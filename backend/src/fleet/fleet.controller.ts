@@ -1,5 +1,6 @@
 // 设备 / 基站 / 巡航路线 控制器（REST API，全部 @Public 供外部调用/文档可看）
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -11,10 +12,12 @@ import {
   Patch,
   Post,
   Put,
+  Query,
 } from "@nestjs/common";
 import { Public } from "../auth/decorators/public.decorator.js";
 import { FleetService, type TelemetryPoint } from "./fleet.service.js";
 import { FleetGateway } from "./fleet.gateway.js";
+import { DataFilesService } from "../data-files/data-files.service.js";
 import type { Device, BaseStation } from "./entities/fleet.entities.js";
 
 @Controller("devices")
@@ -23,6 +26,7 @@ export class DevicesController {
   constructor(
     private readonly fleet: FleetService,
     private readonly gateway: FleetGateway,
+    private readonly dataFiles: DataFilesService,
   ) {}
 
   @Get()
@@ -33,6 +37,23 @@ export class DevicesController {
   @Get("telemetry/latest")
   telemetryLatest() {
     return { devices: this.fleet.latestTelemetry() };
+  }
+
+  /**
+   * 已注册设备拉取“系统 GIS 数据源”地图：仅需设备 id（query: device）与批准密钥
+   * （Header: x-device-key），无需系统账号登录。
+   */
+  @Get("geo/:fileId")
+  async geoData(
+    @Param("fileId", ParseIntPipe) fileId: number,
+    @Query("device") device?: string,
+    @Headers("x-device-key") deviceKey?: string,
+  ) {
+    const deviceId = Number(device);
+    if (!deviceId) throw new BadRequestException("缺少 device 查询参数（设备 id）");
+    await this.fleet.authorizeDevice(deviceId, deviceKey);
+    const text = await this.dataFiles.readForDevice(fileId);
+    return JSON.parse(text);
   }
 
   /**

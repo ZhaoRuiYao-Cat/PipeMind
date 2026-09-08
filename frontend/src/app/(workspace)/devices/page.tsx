@@ -223,6 +223,16 @@ export default function DevicesPage() {
   const [stations, setStations] = useState<StationItem[] | null>(null);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // 确认框（不使用原生 alert）
+  const [confirmBox, setConfirmBox] = useState<{ title: string; text: string; onOk: () => void } | null>(null);
+  const askConfirm = (title: string, text: string, onOk: () => void): void => {
+    setConfirmBox({ title, text, onOk });
+  };
+  const runConfirmOk = (): void => {
+    const box = confirmBox;
+    setConfirmBox(null);
+    if (box) box.onOk();
+  };
 
   // 设备审批/密钥/编辑/巡航
   const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
@@ -403,51 +413,80 @@ export default function DevicesPage() {
     }
   };
 
-  const removeSelectedStation = async (): Promise<void> => {
+  const removeSelectedStation = (): void => {
     if (!selectedStation) return;
-    if (!globalThis.confirm(t(`删除基站“${selectedStation.name}”？`, `Delete station "${selectedStation.name}"?`))) return;
-    try {
-      await jfetch(`/base-stations/${selectedStation.id}`, { method: "DELETE" });
-      setSelectedStation(null);
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    }
+    const st = selectedStation;
+    askConfirm(
+      zh ? "删除基站" : "Delete station",
+      t(`确定删除基站“${st.name}”？（坐标 ${st.lon.toFixed(6)}, ${st.lat.toFixed(6)}）`, `Delete station "${st.name}"? (${st.lon.toFixed(6)}, ${st.lat.toFixed(6)})`),
+      () => {
+        void (async () => {
+          try {
+            await jfetch(`/base-stations/${st.id}`, { method: "DELETE" });
+            setSelectedStation(null);
+            await refresh();
+          } catch (err) {
+            setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+          }
+        })();
+      },
+    );
   };
 
   // ---------- 设备动作 ----------
-  const approveDevice = async (device: DeviceItem): Promise<void> => {
-    if (!globalThis.confirm(t(`同意“${device.name}”入网？将签发一次性设备密钥。`, `Approve "${device.name}"? A one-time secret will be issued.`))) return;
-    setBusy(true);
-    try {
-      const resp = (await jfetch(`/devices/${device.id}/approve`, { method: "POST" })) as { device: DeviceItem; secret: string };
-      setSecretDialog({ name: resp.device.name, id: resp.device.id, secret: resp.secret });
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setBusy(false);
-    }
+  const approveDevice = (device: DeviceItem): void => {
+    askConfirm(
+      zh ? "同意设备入网" : "Approve device",
+      t(`同意“${device.name}”入网？批准后将签发一次性设备密钥（仅显示一次）。`, `Approve "${device.name}"? A one-time secret will be issued (shown once).`),
+      () => {
+        void (async () => {
+          setBusy(true);
+          try {
+            const resp = (await jfetch(`/devices/${device.id}/approve`, { method: "POST" })) as { device: DeviceItem; secret: string };
+            setSecretDialog({ name: resp.device.name, id: resp.device.id, secret: resp.secret });
+            await refresh();
+          } catch (err) {
+            setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+          } finally {
+            setBusy(false);
+          }
+        })();
+      },
+    );
   };
 
-  const rejectDevice = async (device: DeviceItem): Promise<void> => {
-    if (!globalThis.confirm(t(`拒绝“${device.name}”的注册申请？`, `Reject "${device.name}" registration?`))) return;
-    try {
-      await jfetch(`/devices/${device.id}/reject`, { method: "POST" });
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    }
+  const rejectDevice = (device: DeviceItem): void => {
+    askConfirm(
+      zh ? "拒绝入网" : "Reject device",
+      t(`确定拒绝“${device.name}”的注册申请？`, `Reject "${device.name}" registration?`),
+      () => {
+        void (async () => {
+          try {
+            await jfetch(`/devices/${device.id}/reject`, { method: "POST" });
+            await refresh();
+          } catch (err) {
+            setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+          }
+        })();
+      },
+    );
   };
 
-  const removeDevice = async (device: DeviceItem): Promise<void> => {
-    if (!globalThis.confirm(t(`删除“${device.name}”？`, `Remove "${device.name}"?`))) return;
-    try {
-      await jfetch(`/devices/${device.id}`, { method: "DELETE" });
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    }
+  const removeDevice = (device: DeviceItem): void => {
+    askConfirm(
+      zh ? "删除设备" : "Remove device",
+      t(`确定删除“${device.name}”？此操作会同时注销其密钥。`, `Remove "${device.name}"? Its secret will be revoked too.`),
+      () => {
+        void (async () => {
+          try {
+            await jfetch(`/devices/${device.id}`, { method: "DELETE" });
+            await refresh();
+          } catch (err) {
+            setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+          }
+        })();
+      },
+    );
   };
 
   const saveEdit = async (): Promise<void> => {
@@ -813,8 +852,28 @@ export default function DevicesPage() {
             </DialogActions>
           </Dialog>
 
+          {/* 确认框（替代原生 alert） */}
+          <Dialog open={confirmBox !== null} onClose={() => setConfirmBox(null)} maxWidth="xs" fullWidth>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{confirmBox?.title}</DialogTitle>
+            <DialogContent>
+              <Typography sx={{ fontSize: 13.5, color: "var(--pm-color-text-secondary)", lineHeight: 1.7 }}>
+                {confirmBox?.text}
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ px: 2.5, pb: 2 }}>
+              <Button size="small" onClick={() => setConfirmBox(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
+              <Button size="small" variant="contained" disableElevation autoFocus onClick={runConfirmOk} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("确定", "Confirm")}</Button>
+            </DialogActions>
+          </Dialog>
+
           <Snackbar open={notice !== null} autoHideDuration={4000} onClose={() => setNotice(null)} anchorOrigin={{ vertical: "top", horizontal: "center" }}>
-            <Alert severity={notice?.kind ?? "info"} variant="outlined" onClose={() => setNotice(null)} sx={{ borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.95)" }}>{notice?.text}</Alert>
+            {notice ? (
+              <Alert severity={notice.kind} variant="outlined" onClose={() => setNotice(null)} sx={{ borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.95)" }}>
+                {notice.text}
+              </Alert>
+            ) : (
+              <Box sx={{ display: "none" }} />
+            )}
           </Snackbar>
         </Box>
       </Box>

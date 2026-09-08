@@ -266,6 +266,20 @@ export class DataFilesService {
   }
 
   /**
+   * 已注册设备读取“系统 GIS 数据源”内容（权限校验由 Fleet 层按设备密钥完成）。
+   * @param id - 文件记录 id
+   * @returns {Promise<string>} 文本内容
+   */
+  async readForDevice(id: number): Promise<string> {
+    const row = await this.dataFileRepository.findOneBy({ id });
+    if (!row) {
+      throw new NotFoundException('文件不存在');
+    }
+    const filePath = this.userFilePath(row.userId, row.storedName);
+    return readFile(filePath, 'utf8');
+  }
+
+  /**
    * 流式输出文件内容。
    * @param res - express 响应对象
    * @param row - 文件记录
