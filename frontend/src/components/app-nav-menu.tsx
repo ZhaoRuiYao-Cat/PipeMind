@@ -13,6 +13,7 @@ import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import HubOutlined from "@mui/icons-material/HubOutlined";
 import FolderSharedRounded from "@mui/icons-material/FolderSharedRounded";
 import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
+import ApiRounded from "@mui/icons-material/ApiRounded";
 import { useI18n } from "@/lib/i18n";
 
 interface NavEntry {
@@ -52,6 +53,12 @@ const NAV_ENTRIES: NavEntry[] = [
     path: "/data",
     textKey: "navData",
     icon: <FolderSharedRounded sx={{ fontSize: 20 }} />,
+  },
+  {
+    key: "api",
+    path: "/api-docs",
+    textKey: "navApi",
+    icon: <ApiRounded sx={{ fontSize: 20 }} />,
   },
   {
     key: "settings",

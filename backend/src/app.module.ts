@@ -22,6 +22,9 @@ import { DataFile } from './data-files/entities/data-file.entity.js';
 import { DataFilesModule } from './data-files/data-files.module.js';
 import { Flow } from './flows/entities/flow.entity.js';
 import { FlowsModule } from './flows/flows.module.js';
+import { Device, DeviceRoute, BaseStation } from './fleet/entities/fleet.entities.js';
+import { FleetModule } from './fleet/fleet.module.js';
+import { CatalogModule } from './catalog/catalog.module.js';
 
 @Module({
   imports: [
@@ -48,6 +51,9 @@ import { FlowsModule } from './flows/flows.module.js';
           UiAction,
           DataFile,
           Flow,
+          Device,
+          DeviceRoute,
+          BaseStation,
         ],
         synchronize: config.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
       }),
@@ -62,6 +68,8 @@ import { FlowsModule } from './flows/flows.module.js';
     AiChatModule,
     DataFilesModule,
     FlowsModule,
+    FleetModule,
+    CatalogModule,
   ],
   controllers: [],
   providers: [],
