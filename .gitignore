@@ -26,3 +26,6 @@ release/
 
 # ---- installer runtime ----
 installer/runtime.json
+
+# ---- 设备固件/配套工程（本地保留，不作为本项目仓库的一部分） ----
+device/
