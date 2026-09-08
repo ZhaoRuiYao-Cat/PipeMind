@@ -63,5 +63,15 @@ export function validateOptions(opts) {
   if (String(admin.password ?? "").length < 4) problems.push("管理员密码至少 4 位");
   if (/^\d+$/.test(String(opts?.backendPort ?? "")) === false) problems.push("后端端口必须是数字");
   if (/^\d+$/.test(String(opts?.frontendPort ?? "")) === false) problems.push("前端端口必须是数字");
+  // RSA 密钥路径（可选，默认自动生成；禁止 .. 逃逸）
+  const rsaPaths = [String(opts?.rsaPrivatePath ?? "").trim(), String(opts?.rsaPublicPath ?? "").trim()];
+  for (const p of rsaPaths) {
+    if (p && /(^|[\\/])\.\.([\\/]|$)/.test(p)) problems.push("密钥路径不允许包含 ..");
+  }
+  // 令牌有效期（可选）
+  const ttls = [opts?.accessTtl, opts?.refreshTtl, opts?.rememberTtl].filter((v) => v !== undefined && v !== "");
+  for (const v of ttls) {
+    if (/^\d+$/.test(String(v)) === false) problems.push("令牌有效期（TTL）必须是正整数秒");
+  }
   return problems;
 }

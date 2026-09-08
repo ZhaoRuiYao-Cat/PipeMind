@@ -51,6 +51,14 @@ export interface InstallOptions {
   backendPort: string;
   frontendPort: string;
   frontendOrigin: string;
+  dbSync?: boolean;
+  cookieSecure?: boolean;
+  accessTtl?: string;
+  refreshTtl?: string;
+  rememberTtl?: string;
+  rsaPrivatePath?: string;
+  rsaPublicPath?: string;
+  rsaRegenerate?: boolean;
 }
 
 export interface ActiveJobResult {

@@ -10,6 +10,8 @@ import Step from "@mui/material/Step";
 import StepLabel from "@mui/material/StepLabel";
 import Button from "@mui/material/Button";
 import TextField from "@mui/material/TextField";
+import Switch from "@mui/material/Switch";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import LinearProgress from "@mui/material/LinearProgress";
@@ -74,6 +76,23 @@ export default function App() {
   const [backendPort, setBackendPort] = useState("3001");
   const [frontendPort, setFrontendPort] = useState("3000");
   const [frontendOrigin, setFrontendOrigin] = useState("http://localhost:3000");
+  // 高级配置（密钥/令牌/同步等）
+  const [configTab, setConfigTab] = useState(0); // 0 数据库 | 1 管理员 | 2 服务与访问 | 3 密钥与高级
+  const [dbSync, setDbSync] = useState(true);
+  const [cookieSecure, setCookieSecure] = useState(false);
+  const [accessTtl, setAccessTtl] = useState("1800");
+  const [refreshTtl, setRefreshTtl] = useState("604800");
+  const [rememberTtl, setRememberTtl] = useState("2592000");
+  const [rsaPrivatePath, setRsaPrivatePath] = useState("keys/private.pem");
+  const [rsaPublicPath, setRsaPublicPath] = useState("keys/public.pem");
+  const [rsaRegenerate, setRsaRegenerate] = useState(false);
+
+  const CONFIG_TABS = [
+    { key: "db", label: "数据库", labelEn: "Database" },
+    { key: "admin", label: "管理员账号", labelEn: "Admin" },
+    { key: "service", label: "服务与访问", labelEn: "Service & Access" },
+    { key: "advanced", label: "密钥与高级", labelEn: "Keys & Advanced" },
+  ];
 
   const runChecks = useCallback(async () => {
     setChecksLoading(true);
@@ -105,6 +124,13 @@ export default function App() {
         if (env.DB_NAME) setDbName(env.DB_NAME);
         if (env.AUTH_ADMIN_USERNAME) setAdminUser(env.AUTH_ADMIN_USERNAME);
         if (env.PORT) setBackendPort(env.PORT);
+        if (env.DB_SYNCHRONIZE !== undefined) setDbSync(env.DB_SYNCHRONIZE !== "false");
+        if (env.COOKIE_SECURE !== undefined) setCookieSecure(env.COOKIE_SECURE === "true");
+        if (env.AUTH_ACCESS_TOKEN_TTL) setAccessTtl(env.AUTH_ACCESS_TOKEN_TTL);
+        if (env.AUTH_REFRESH_TOKEN_TTL) setRefreshTtl(env.AUTH_REFRESH_TOKEN_TTL);
+        if (env.AUTH_REMEMBER_TOKEN_TTL) setRememberTtl(env.AUTH_REMEMBER_TOKEN_TTL);
+        if (env.RSA_PRIVATE_KEY_PATH) setRsaPrivatePath(env.RSA_PRIVATE_KEY_PATH);
+        if (env.RSA_PUBLIC_KEY_PATH) setRsaPublicPath(env.RSA_PUBLIC_KEY_PATH);
         if (env.CORS_ORIGIN) {
           setFrontendOrigin(env.CORS_ORIGIN);
           try {
@@ -132,6 +158,23 @@ export default function App() {
     if (installedAction === "ask" && dir === "next") setInstalledAction("continue");
     setNavDir(dir);
     setActiveStep(step);
+  }
+
+  // 配置页内子分类导航
+  function configBack() {
+    if (configTab === 0) {
+      goTo(0, "back");
+    } else {
+      setNavDir("back");
+      setConfigTab(configTab - 1);
+    }
+  }
+
+  function configNext() {
+    if (configTab < CONFIG_TABS.length - 1) {
+      setNavDir("next");
+      setConfigTab(configTab + 1);
+    }
   }
 
   // 成功/提示自动消失
@@ -233,6 +276,14 @@ export default function App() {
       backendPort: backendPort.trim(),
       frontendPort: frontendPort.trim(),
       frontendOrigin: frontendOrigin.trim(),
+      dbSync,
+      cookieSecure,
+      accessTtl: accessTtl.trim(),
+      refreshTtl: refreshTtl.trim(),
+      rememberTtl: rememberTtl.trim(),
+      rsaPrivatePath: rsaPrivatePath.trim(),
+      rsaPublicPath: rsaPublicPath.trim(),
+      rsaRegenerate,
     };
     try {
       const { id } = await api.install(opts);
@@ -432,53 +483,133 @@ export default function App() {
           </Box>
         )}
 
-        {/* Step 1 —— 部署配置 */}
+        {/* Step 1 —— 部署配置（按类别分页） */}
         {activeStep === 1 && (
           <Box>
-            <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>
-              数据库 / MySQL
-            </Typography>
-            <Stack spacing={2}>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="数据库地址" value={dbHost} onChange={(e) => setDbHost(e.target.value)} fullWidth />
-                <TextField label="端口" value={dbPort} onChange={(e) => setDbPort(e.target.value)} sx={{ width: { xs: "100%", sm: 160 } }} />
-              </Stack>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="用户名" value={dbUser} onChange={(e) => setDbUser(e.target.value)} fullWidth />
-                <TextField label="密码" type="password" value={dbPassword} onChange={(e) => setDbPassword(e.target.value)} fullWidth />
-              </Stack>
-              <TextField label="数据库名（不存在将自动创建）" value={dbName} onChange={(e) => setDbName(e.target.value)} />
+            {/* 类别切换 */}
+            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+              {CONFIG_TABS.map((tab, idx) => (
+                <Button
+                  key={tab.key}
+                  size="small"
+                  variant={configTab === idx ? "contained" : "text"}
+                  onClick={() => {
+                    setNavDir(idx >= configTab ? "next" : "back");
+                    setConfigTab(idx);
+                  }}
+                  sx={configTab === idx ? {} : { color: "text.secondary" }}
+                >
+                  {idx + 1}. {tab.label}
+                </Button>
+              ))}
             </Stack>
 
-            <Typography variant="subtitle1" fontWeight={700} sx={{ mt: 3, mb: 1 }}>
-              初始管理员 / Administrator
-            </Typography>
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-              <TextField label="用户名" value={adminUser} onChange={(e) => setAdminUser(e.target.value)} fullWidth />
-              <TextField label="密码（至少 4 位）" type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} fullWidth />
-            </Stack>
+            {/* ① 数据库 */}
+            {configTab === 0 && (
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>
+                  数据库 / Database
+                </Typography>
+                <Stack spacing={2}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="数据库地址 (DB_HOST)" value={dbHost} onChange={(e) => setDbHost(e.target.value)} fullWidth />
+                    <TextField label="端口 (DB_PORT)" value={dbPort} onChange={(e) => setDbPort(e.target.value)} sx={{ width: { xs: "100%", sm: 170 } }} />
+                  </Stack>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="用户名 (DB_USER)" value={dbUser} onChange={(e) => setDbUser(e.target.value)} fullWidth />
+                    <TextField label="密码 (DB_PASSWORD)" type="password" value={dbPassword} onChange={(e) => setDbPassword(e.target.value)} fullWidth />
+                  </Stack>
+                  <TextField label="数据库名 (DB_NAME)（不存在将自动创建）" value={dbName} onChange={(e) => setDbName(e.target.value)} />
+                </Stack>
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  安装时会自动执行 CREATE DATABASE IF NOT EXISTS（utf8mb4），无需提前建库。
+                </Alert>
+              </Box>
+            )}
 
-            <Typography variant="subtitle1" fontWeight={700} sx={{ mt: 3, mb: 1 }}>
-              服务端口 / Ports
-            </Typography>
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-              <TextField label="后端端口" value={backendPort} onChange={(e) => setBackendPort(e.target.value)} sx={{ width: { xs: "100%", sm: 180 } }} />
-              <TextField label="前端端口" value={frontendPort} onChange={(e) => setFrontendPort(e.target.value)} sx={{ width: { xs: "100%", sm: 180 } }} />
-              <TextField label="前端访问地址" value={frontendOrigin} onChange={(e) => setFrontendOrigin(e.target.value)} fullWidth />
-            </Stack>
+            {/* ② 管理员账号 */}
+            {configTab === 1 && (
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>
+                  初始管理员 / Administrator
+                </Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                  <TextField label="用户名 (AUTH_ADMIN_USERNAME)" value={adminUser} onChange={(e) => setAdminUser(e.target.value)} fullWidth />
+                  <TextField label="密码 (AUTH_ADMIN_PASSWORD)（至少 4 位）" type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} fullWidth />
+                </Stack>
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  仅当系统中不存在该用户名时才自动创建（幂等），登录后可在系统内修改密码。
+                </Alert>
+              </Box>
+            )}
+
+            {/* ③ 服务与访问 */}
+            {configTab === 2 && (
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>
+                  服务与访问 / Service &amp; Access
+                </Typography>
+                <Stack spacing={2}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="后端端口 (PORT)" value={backendPort} onChange={(e) => setBackendPort(e.target.value)} sx={{ width: { xs: "100%", sm: 180 } }} />
+                    <TextField label="前端端口" value={frontendPort} onChange={(e) => setFrontendPort(e.target.value)} sx={{ width: { xs: "100%", sm: 180 } }} />
+                  </Stack>
+                  <TextField label="前端访问地址 (CORS_ORIGIN)" value={frontendOrigin} onChange={(e) => setFrontendOrigin(e.target.value)} />
+                  <FormControlLabel
+                    control={<Switch checked={cookieSecure} onChange={(e) => setCookieSecure(e.target.checked)} />}
+                    label="Cookie 仅通过 HTTPS 发送 (COOKIE_SECURE)"
+                  />
+                </Stack>
+              </Box>
+            )}
+
+            {/* ④ 密钥与高级 */}
+            {configTab === 3 && (
+              <Box>
+                <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>
+                  密钥与高级 / Keys &amp; Advanced
+                </Typography>
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  RSA 密钥用于登录口令加密。默认<b>自动生成</b>：全新安装无需准备任何证书，配置写入后即生成，保证首次启动健康检查即通过。
+                </Alert>
+                <Stack spacing={2}>
+                  <TextField label="私钥路径 (RSA_PRIVATE_KEY_PATH)" value={rsaPrivatePath} onChange={(e) => setRsaPrivatePath(e.target.value)} helperText="相对 backend/ 运行目录或绝对路径" />
+                  <TextField label="公钥路径 (RSA_PUBLIC_KEY_PATH)" value={rsaPublicPath} onChange={(e) => setRsaPublicPath(e.target.value)} helperText="相对 backend/ 运行目录或绝对路径" />
+                  <FormControlLabel
+                    control={<Switch checked={rsaRegenerate} onChange={(e) => setRsaRegenerate(e.target.checked)} />}
+                    label="强制重新生成密钥（覆盖已有密钥文件）"
+                  />
+                  <FormControlLabel
+                    control={<Switch checked={dbSync} onChange={(e) => setDbSync(e.target.checked)} />}
+                    label="启动时自动同步数据库表结构 (DB_SYNCHRONIZE)"
+                  />
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                    <TextField label="访问令牌 TTL 秒 (AUTH_ACCESS_TOKEN_TTL)" value={accessTtl} onChange={(e) => setAccessTtl(e.target.value)} sx={{ width: { xs: "100%", sm: 220 } }} />
+                    <TextField label="刷新令牌 TTL 秒 (AUTH_REFRESH_TOKEN_TTL)" value={refreshTtl} onChange={(e) => setRefreshTtl(e.target.value)} sx={{ width: { xs: "100%", sm: 220 } }} />
+                    <TextField label="记住登录 TTL 秒 (AUTH_REMEMBER_TOKEN_TTL)" value={rememberTtl} onChange={(e) => setRememberTtl(e.target.value)} sx={{ width: { xs: "100%", sm: 220 } }} />
+                  </Stack>
+                </Stack>
+              </Box>
+            )}
 
             <Alert severity="info" sx={{ mt: 2.5 }}>
-              安装过程：写入配置 → 安装前后端依赖（npm ci）→ 初始化数据库与账号 → 编译 → 自动启动并完成健康检查。耗时取决于网络与机器性能，请保持页面打开。
+              安装过程：写入配置（含预生成 RSA 密钥）→ 安装前后端依赖 → 初始化数据库与账号 → 编译 → 自动启动并完成健康检查。耗时取决于网络与机器性能，请保持页面打开。
             </Alert>
 
-            {/* 上一步 / 一键安装 统一靠右 */}
+            {/* 上一步 / 下一步 / 一键安装 统一靠右 */}
             <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end", mt: 2 }}>
-              <Button variant="outlined" onClick={() => goTo(0, "back")}>
+              <Button variant="outlined" onClick={configBack}>
                 上一步
               </Button>
-              <Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => void beginInstall()}>
-                一键安装
-              </Button>
+              {configTab < CONFIG_TABS.length - 1 ? (
+                <Button variant="contained" endIcon={<ArrowForwardRounded />} onClick={configNext}>
+                  下一步
+                </Button>
+              ) : (
+                <Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => void beginInstall()}>
+                  一键安装
+                </Button>
+              )}
             </Stack>
           </Box>
         )}
