@@ -1,6 +1,6 @@
 "use client";
 
-// 设备与基站：设备发起注册 → 管理端审批（同意签发一次性密钥/拒绝），巡航路线、基站管理
+// 设备与基站：设备注册审批、巡航路线、巡航/实时；基站直接在地图组件上管理（右键新建/左键编辑删除）
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ThemeProvider } from "@mui/material/styles";
 import Box from "@mui/material/Box";
@@ -30,6 +30,7 @@ import EditOutlined from "@mui/icons-material/EditOutlined";
 import FlightTakeoffRounded from "@mui/icons-material/FlightTakeoffRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import RouteRounded from "@mui/icons-material/RouteRounded";
+import SaveOutlined from "@mui/icons-material/SaveOutlined";
 import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import { useI18n } from "@/lib/i18n";
 import { pmTheme } from "@/lib/theme";
@@ -55,7 +56,31 @@ interface StationItem {
   description: string | null;
 }
 
-/** 从 GeoJSON 提取管线坐标段（用于“地图点选基站”的背景底图） */
+type Lang = "zh-CN" | "en-US";
+const T: Record<string, Record<Lang, string>> = {
+  title: { "zh-CN": "设备与基站", "en-US": "Devices & Stations" },
+  subtitle: {
+    "zh-CN": "设备端注册 → 审批接入；为已注册设备基于 GIS 数据源规划巡航路线；基站直接在下图地图上规划管理。",
+    "en-US": "Devices register and are approved here; plan cruise routes from the GIS source; manage base stations right on the map.",
+  },
+};
+
+async function jfetch(path: string, init?: RequestInit): Promise<unknown> {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", headers: { "Content-Type": "application/json" }, ...init });
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body.message) message = body.message;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+// ---------- 地图工具 ----------
 function extractGeoLines(raw: unknown): number[][][] {
   const lines: number[][][] = [];
   const fc = raw as { features?: Array<{ geometry?: { type?: string; coordinates?: unknown } }> };
@@ -70,82 +95,51 @@ function extractGeoLines(raw: unknown): number[][][] {
         .map((c) => [Number(c[0]), Number(c[1])]);
       if (line.length >= 2) lines.push(line);
     };
-    if (g.type === "MultiLineString" && Array.isArray(g.coordinates)) {
-      (g.coordinates as unknown[]).forEach(push);
-    } else if (g.type === "LineString") {
-      push(g.coordinates);
-    }
+    if (g.type === "MultiLineString" && Array.isArray(g.coordinates)) (g.coordinates as unknown[]).forEach(push);
+    else if (g.type === "LineString") push(g.coordinates);
   }
   return lines;
 }
 
-/** 点选地图的视口变换（zoom + 平移偏移，CSS 像素坐标系） */
-export interface PickerView {
-  zoom: number;
-  tx: number;
-  ty: number;
-}
-
+export interface PickerView { zoom: number; tx: number; ty: number }
 const PAD = 30;
-
-/** 依据数据范围计算“贴合画布”的基准投影几何 */
-function pickerFit(
-  lines: number[][][],
-  width: number,
-  height: number,
-): { minLon: number; maxLat: number; cos: number; scale: number } {
+interface PickerFit { minLon: number; maxLat: number; cos: number; scale: number }
+function pickerFit(lines: number[][][], width: number, height: number): PickerFit {
   let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-  for (const line of lines) {
-    for (const [lon, lat] of line) {
-      minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
-      minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
-    }
+  for (const line of lines) for (const [lon, lat] of line) {
+    minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
+    minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
   }
-  if (!Number.isFinite(minLon)) {
-    minLon = 126.5; maxLon = 127.5; minLat = 46.3; maxLat = 46.9;
-  }
+  if (!Number.isFinite(minLon)) { minLon = 126.5; maxLon = 127.5; minLat = 46.3; maxLat = 46.9; }
   const cos = Math.cos(((minLat + maxLat) / 2) * Math.PI / 180);
   const spanLonM = (maxLon - minLon) * 111320 * cos;
   const spanLatM = (maxLat - minLat) * 110540;
   const scale = Math.min((width - PAD * 2) / Math.max(spanLonM, 1), (height - PAD * 2) / Math.max(spanLatM, 1));
   return { minLon, maxLat, cos, scale };
 }
-
-function pickerBasePoint(fit: { minLon: number; maxLat: number; cos: number; scale: number }, lon: number, lat: number): { x: number; y: number } {
+function basePoint(fit: PickerFit, lon: number, lat: number): { x: number; y: number } {
+  return { x: PAD + (lon - fit.minLon) * 111320 * fit.cos * fit.scale, y: PAD + (fit.maxLat - lat) * 110540 * fit.scale };
+}
+function toCss(W: number, H: number, v: PickerView, x: number, y: number): { x: number; y: number } {
+  return { x: (x - W / 2) * v.zoom + W / 2 + v.tx, y: (y - H / 2) * v.zoom + H / 2 + v.ty };
+}
+function fromCss(lines: number[][][], W: number, H: number, v: PickerView, cx: number, cy: number): { lon: number; lat: number } {
+  const fit = pickerFit(lines, W, H);
+  const bx = (cx - v.tx - W / 2) / v.zoom + W / 2;
+  const by = (cy - v.ty - H / 2) / v.zoom + H / 2;
   return {
-    x: PAD + (lon - fit.minLon) * 111320 * fit.cos * fit.scale,
-    y: PAD + (fit.maxLat - lat) * 110540 * fit.scale,
+    lon: fit.minLon + (bx - PAD) / (111320 * fit.cos * fit.scale),
+    lat: fit.maxLat - (by - PAD) / (110540 * fit.scale),
   };
 }
 
-function pickerToCss(width: number, height: number, view: PickerView, x: number, y: number): { x: number; y: number } {
-  const cx = width / 2, cy = height / 2;
-  return { x: (x - cx) * view.zoom + cx + view.tx, y: (y - cy) * view.zoom + cy + view.ty };
-}
-
-function pickerFromCss(
-  lines: number[][][],
-  width: number,
-  height: number,
-  view: PickerView,
-  cssX: number,
-  cssY: number,
-): { lon: number; lat: number } {
-  const fit = pickerFit(lines, width, height);
-  const cx = width / 2, cy = height / 2;
-  const bx = (cssX - view.tx - cx) / view.zoom + cx;
-  const by = (cssY - view.ty - cy) / view.zoom + cy;
-  const lon = fit.minLon + (bx - PAD) / (111320 * fit.cos * fit.scale);
-  const lat = fit.maxLat - (by - PAD) / (110540 * fit.scale);
-  return { lon, lat };
-}
-
-/** 画“地图点选”底图：管线 + 已选点，支持 view 平移/缩放 */
-function paintStationPicker(
+/** 基站管理地图：底图 + 基站 + 交互（缩放/平移/点选/右键新建由父层监听） */
+function paintFleetMap(
   canvas: HTMLCanvasElement,
   lines: number[][][],
-  pick: { lon: number; lat: number } | null,
-  view: PickerView,
+  stations: StationItem[],
+  selectedId: number | null,
+  v: PickerView,
 ): void {
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -158,91 +152,45 @@ function paintStationPicker(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const fit = pickerFit(lines, W, H);
-  const at = (lon: number, lat: number): { x: number; y: number } =>
-    pickerToCss(W, H, view, pickerBasePoint(fit, lon, lat).x, pickerBasePoint(fit, lon, lat).y);
-  // 网格（固定屏幕空间）
-  ctx.strokeStyle = "#eef2f7";
-  ctx.lineWidth = 1;
+  const at = (lon: number, lat: number): { x: number; y: number } => toCss(W, H, v, basePoint(fit, lon, lat).x, basePoint(fit, lon, lat).y);
+  // 网格
+  ctx.strokeStyle = "#eef2f7"; ctx.lineWidth = 1;
   for (let i = 0; i < W; i += 40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, H); ctx.stroke(); }
   for (let i = 0; i < H; i += 40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(W, i); ctx.stroke(); }
   // 管线
   ctx.lineCap = "round";
   for (const line of lines) {
-    ctx.strokeStyle = "#8fb7ff";
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "#9dbaf0"; ctx.lineWidth = 1.4;
     ctx.beginPath();
-    line.forEach(([lon, lat], i) => {
-      const p = at(lon, lat);
-      if (i === 0) ctx.moveTo(p.x, p.y);
-      else ctx.lineTo(p.x, p.y);
-    });
+    line.forEach(([lon, lat], i) => { const p = at(lon, lat); i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); });
     ctx.stroke();
   }
   if (lines.length === 0) {
-    ctx.fillStyle = "#9aa4b2";
-    ctx.font = "12px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("滚轮缩放 / 拖拽平移 / 点击选点（当前无 GIS 底图）", W / 2, H / 2 - 30);
+    ctx.fillStyle = "#9aa4b2"; ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("右键：新建基站 · 左键：选中基站 · 滚轮/拖拽：浏览地图", W / 2, H / 2 - 26);
   }
-  // 已选点
-  if (pick) {
-    const p = at(pick.lon, pick.lat);
-    ctx.strokeStyle = "#cf1322";
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(p.x - 12, p.y); ctx.lineTo(p.x + 12, p.y);
-    ctx.moveTo(p.x, p.y - 12); ctx.lineTo(p.x, p.y + 12);
-    ctx.stroke();
+  // 基站
+  ctx.textAlign = "left";
+  for (const st of stations) {
+    const p = at(st.lon, st.lat);
+    const selected = st.id === selectedId;
+    ctx.fillStyle = selected ? "#1664ff" : "#2e9e5b";
+    ctx.beginPath(); ctx.arc(p.x, p.y, selected ? 7 : 5.5, 0, Math.PI * 2); ctx.fill();
+    if (selected) { ctx.strokeStyle = "#1664ff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(p.x, p.y, 11, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.fillStyle = selected ? "#1664ff" : "#0a8a5f";
+    ctx.font = "600 11px system-ui, sans-serif";
+    ctx.fillText(st.name, p.x + 10, p.y + 4);
   }
-}
-
-type Lang = "zh-CN" | "en-US";
-const T: Record<string, Record<Lang, string>> = {
-  title: { "zh-CN": "设备与基站", "en-US": "Devices & Stations" },
-  subtitle: {
-    "zh-CN": "设备端发起注册申请，由本系统审批同意后签发一次性密钥接入；并为已注册设备规划基于 GIS 数据源的巡航路线，管理基站。",
-    "en-US": "Devices apply to join; the system approves them and issues a one-time secret. Plan cruise routes from the GIS source and manage base stations.",
-  },
-};
-
-async function jfetch(path: string, init?: RequestInit): Promise<unknown> {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", headers: { "Content-Type": "application/json" }, ...init });
-  if (!res.ok) {
-    const body = await res.text();
-    let message = `HTTP ${res.status}`;
-    try {
-      const parsed = JSON.parse(body) as { message?: string };
-      if (parsed.message) message = parsed.message;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(message);
+  if (stations.length === 0) {
+    ctx.fillStyle = "#9aa4b2"; ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("暂无基站：在地图上右键即可新建", W / 2, H / 2 - 6);
   }
-  return res.json();
 }
 
 function samplePoints(raw: unknown, maxPoints = 120): Array<{ lon: number; lat: number }> {
+  const lines = extractGeoLines(raw);
   const out: Array<{ lon: number; lat: number }> = [];
-  const fc = raw as { features?: Array<{ geometry?: { type?: string; coordinates?: unknown } }> };
-  if (!fc?.features) return out;
-  for (const feature of fc.features) {
-    const g = feature.geometry;
-    if (!g) continue;
-    if (g.type === "MultiLineString" && Array.isArray(g.coordinates)) {
-      for (const line of g.coordinates as unknown[][]) {
-        if (!Array.isArray(line)) continue;
-        for (let i = 0; i < line.length; i += 1) {
-          const coord = line[i] as number[];
-          if (Array.isArray(coord) && coord.length >= 2) out.push({ lon: coord[0], lat: coord[1] });
-        }
-      }
-    } else if (g.type === "LineString" && Array.isArray(g.coordinates)) {
-      for (const coord of g.coordinates as number[][]) {
-        if (Array.isArray(coord) && coord.length >= 2) out.push({ lon: coord[0], lat: coord[1] });
-      }
-    }
-  }
+  for (const line of lines) for (const [lon, lat] of line) out.push({ lon, lat });
   if (out.length <= maxPoints) return out;
   const step = out.length / maxPoints;
   const sampled: Array<{ lon: number; lat: number }> = [];
@@ -268,22 +216,22 @@ export default function DevicesPage() {
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // 审批密钥（一次性展示）
+  // 设备审批/密钥/编辑/巡航
   const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
   const [copied, setCopied] = useState<"secret" | "curl" | null>(null);
-
-  // 编辑（仅名称/备注）、路线、基站
   const [editing, setEditing] = useState<DeviceItem | null>(null);
   const [editForm, setEditForm] = useState({ name: "", description: "" });
   const [routeFor, setRouteFor] = useState<DeviceItem | null>(null);
   const [routeSourceName, setRouteSourceName] = useState("");
   const [pointsText, setPointsText] = useState("");
-  const [stationDialog, setStationDialog] = useState<StationItem | "new" | null>(null);
-  const [stationForm, setStationForm] = useState({ name: "", purpose: "charging", description: "" });
-  // 地图点选基站（不手输经纬度）
-  const stationCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [stationLines, setStationLines] = useState<number[][][]>([]);
-  const [stationPick, setStationPick] = useState<{ lon: number; lat: number } | null>(null);
+
+  // 基站地图
+  const mapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mapViewRef = useRef<PickerView>({ zoom: 1, tx: 0, ty: 0 });
+  const mapDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const [mapLines, setMapLines] = useState<number[][][]>([]);
+  const [selectedStation, setSelectedStation] = useState<StationItem | null>(null);
+  const [draft, setDraft] = useState({ name: "", purpose: "charging", description: "" });
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -299,28 +247,159 @@ export default function DevicesPage() {
     void refresh();
   }, [refresh]);
 
-  const activeSource = useMemo(() => readActiveGisSource(), []);
+  // 地图底图来自当前 GIS 数据源
+  const loadMapSource = useCallback(async (): Promise<void> => {
+    const source = readActiveGisSource();
+    if (!source) { setMapLines([]); return; }
+    try {
+      const res = await fetch(`${API_BASE}/data-files/${source.id}/content`, { credentials: "include" });
+      if (res.ok) setMapLines(extractGeoLines((await res.json()) as unknown));
+    } catch {
+      /* 底图加载失败不阻塞 */
+    }
+  }, []);
+  useEffect(() => {
+    void loadMapSource();
+  }, [loadMapSource]);
 
-  const counts = useMemo(() => {
-    const list = devices ?? [];
-    return {
-      total: list.length,
-      crawler: list.filter((d) => d.type === "crawler" && d.state !== "revoked").length,
-      drone: list.filter((d) => d.type === "drone" && d.state !== "revoked").length,
-      pending: list.filter((d) => d.state === "pending").length,
-      approved: list.filter((d) => d.state === "approved").length,
-    };
-  }, [devices]);
+  const repaintMap = (): void => {
+    const cv = mapCanvasRef.current;
+    if (cv) paintFleetMap(cv, mapLines, stations ?? [], selectedStation?.id ?? null, mapViewRef.current);
+  };
+  useEffect(() => {
+    const cv = mapCanvasRef.current;
+    if (!cv) return;
+    mapViewRef.current = { zoom: 1, tx: 0, ty: 0 };
+    const frame = requestAnimationFrame(repaintMap);
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLines, stations]);
+  useEffect(() => {
+    if (!stations) return;
+    const frame = requestAnimationFrame(repaintMap);
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStation?.id, selectedStation?.name, draft.purpose]);
 
-  const orderedDevices = useMemo(() => {
-    const order: Record<string, number> = { pending: 0, approved: 1, rejected: 2, revoked: 3 };
-    const list = devices ?? [];
-    return [...list].sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.createdAt.localeCompare(b.createdAt));
-  }, [devices]);
+  const zoomAt = (clientX: number, clientY: number, deltaY: number): void => {
+    const cv = mapCanvasRef.current;
+    if (!cv) return;
+    const rect = cv.getBoundingClientRect();
+    const W = Math.max(1, rect.width || 1), H = Math.max(1, rect.height || 1);
+    const v = mapViewRef.current;
+    const cssX = clientX - rect.left, cssY = clientY - rect.top;
+    const factor = deltaY < 0 ? 1.18 : 1 / 1.18;
+    const next = Math.min(24, Math.max(0.3, v.zoom * factor));
+    if (Math.abs(next - v.zoom) < 0.0001) return;
+    const cxx = cssX - W / 2, cyy = cssY - H / 2;
+    const baseX = (cxx - v.tx) / v.zoom, baseY = (cyy - v.ty) / v.zoom;
+    v.zoom = next;
+    v.tx = cxx - baseX * next;
+    v.ty = cyy - baseY * next;
+    repaintMap();
+  };
 
-  // ---------- 设备入网审批 ----------
+  const mapCoordsAt = (clientX: number, clientY: number): { lon: number; lat: number } | null => {
+    const cv = mapCanvasRef.current;
+    if (!cv) return null;
+    const rect = cv.getBoundingClientRect();
+    return fromCss(mapLines, Math.max(1, rect.width || 1), Math.max(1, rect.height || 1), mapViewRef.current, clientX - rect.left, clientY - rect.top);
+  };
+
+  const onMapDown = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    if (event.button !== 0) return;
+    (event.currentTarget as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
+    mapDragRef.current = { x: event.clientX, y: event.clientY, moved: false };
+  };
+  const onMapMove = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    const drag = mapDragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (drag.moved) {
+      const v = mapViewRef.current;
+      v.tx += dx; v.ty += dy;
+      mapDragRef.current = { x: event.clientX, y: event.clientY, moved: true };
+      repaintMap();
+    }
+  };
+  const onMapUp = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    const cv = mapCanvasRef.current;
+    const drag = mapDragRef.current;
+    mapDragRef.current = null;
+    if (!cv || !drag || drag.moved) return;
+    // 命中基站？
+    const rect = cv.getBoundingClientRect();
+    const cssX = event.clientX - rect.left, cssY = event.clientY - rect.top;
+    const W = Math.max(1, rect.width || 1), H = Math.max(1, rect.height || 1);
+    const fit = pickerFit(mapLines, W, H);
+    let hit: StationItem | null = null;
+    for (const st of stations ?? []) {
+      const p = toCss(W, H, mapViewRef.current, basePoint(fit, st.lon, st.lat).x, basePoint(fit, st.lon, st.lat).y);
+      if (Math.hypot(p.x - cssX, p.y - cssY) < 13) { hit = st; break; }
+    }
+    if (hit) {
+      setSelectedStation(hit);
+      setDraft({ name: hit.name, purpose: hit.purpose, description: hit.description ?? "" });
+    } else {
+      setSelectedStation(null);
+    }
+  };
+  const onMapCancel = (): void => { mapDragRef.current = null; };
+
+  // 右键新建基站（就地创建并选中，浮层内继续改名称/用途）
+  const onCreateStation = (clientX: number, clientY: number): void => {
+    const coords = mapCoordsAt(clientX, clientY);
+    if (!coords) return;
+    void (async () => {
+      try {
+        const nextName = t(`基站 ${(stations?.length ?? 0) + 1}`, `Station ${(stations?.length ?? 0) + 1}`);
+        const created = (await jfetch("/base-stations", {
+          method: "POST",
+          body: JSON.stringify({ name: nextName, lon: coords.lon, lat: coords.lat, purpose: "charging", description: null }),
+        })) as StationItem;
+        await refresh();
+        setSelectedStation(created);
+        setDraft({ name: created.name, purpose: created.purpose, description: created.description ?? "" });
+        setNotice({ kind: "success", text: t(`已新建基站“${created.name}”，可在左栏卡片调整`, `Station "${created.name}" created — tweak it in the side card`) });
+      } catch (err) {
+        setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  };
+
+  const saveSelectedStation = async (): Promise<void> => {
+    if (!selectedStation) return;
+    setBusy(true);
+    try {
+      await jfetch(`/base-stations/${selectedStation.id}`, { method: "PATCH", body: JSON.stringify(draft) });
+      await refresh();
+      const updated = (stations ?? []).find((s) => s.id === selectedStation.id) ?? null;
+      setSelectedStation(updated);
+      if (updated) setDraft({ name: updated.name, purpose: updated.purpose, description: updated.description ?? "" });
+      setNotice({ kind: "success", text: t("基站已保存", "Station saved") });
+    } catch (err) {
+      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeSelectedStation = async (): Promise<void> => {
+    if (!selectedStation) return;
+    if (!globalThis.confirm(t(`删除基站“${selectedStation.name}”？`, `Delete station "${selectedStation.name}"?`))) return;
+    try {
+      await jfetch(`/base-stations/${selectedStation.id}`, { method: "DELETE" });
+      setSelectedStation(null);
+      await refresh();
+    } catch (err) {
+      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  // ---------- 设备动作 ----------
   const approveDevice = async (device: DeviceItem): Promise<void> => {
-    if (!globalThis.confirm(t(`同意“${device.name}”入网？批准后将签发一次性设备密钥。`, `Approve "${device.name}"? A one-time secret will be issued.`))) return;
+    if (!globalThis.confirm(t(`同意“${device.name}”入网？将签发一次性设备密钥。`, `Approve "${device.name}"? A one-time secret will be issued.`))) return;
     setBusy(true);
     try {
       const resp = (await jfetch(`/devices/${device.id}/approve`, { method: "POST" })) as { device: DeviceItem; secret: string };
@@ -367,10 +446,9 @@ export default function DevicesPage() {
     }
   };
 
-  // ---------- 巡航路线 ----------
   const openRoute = async (device: DeviceItem): Promise<void> => {
     setRouteFor(device);
-    setRouteSourceName(activeSource?.name ?? "");
+    setRouteSourceName(readActiveGisSource()?.name ?? "");
     setPointsText("");
     try {
       const saved = (await jfetch(`/devices/${device.id}/route`)) as { sourceText: string | null; pointsText: string | null } | null;
@@ -382,21 +460,14 @@ export default function DevicesPage() {
         try {
           const src = JSON.parse(saved.sourceText) as { name?: string };
           if (src?.name) setRouteSourceName(src.name);
-        } catch {
-          /* ignore */
-        }
+        } catch { /* ignore */ }
       }
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   };
 
   const generateFromSource = async (): Promise<void> => {
     const source = readActiveGisSource();
-    if (!source) {
-      setNotice({ kind: "error", text: t("当前没有 GIS 数据源，请先在首页选择", "No active GIS source; pick one on Home first") });
-      return;
-    }
+    if (!source) { setNotice({ kind: "error", text: t("当前没有 GIS 数据源，请先在首页选择", "No active GIS source; pick one on Home first") }); return; }
     setBusy(true);
     try {
       const res = await fetch(`${API_BASE}/data-files/${source.id}/content`, { credentials: "include" });
@@ -416,17 +487,11 @@ export default function DevicesPage() {
     if (!routeFor) return;
     setBusy(true);
     try {
-      const lines = pointsText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      const points = lines.map((line) => {
-        const parts = line.split(",");
-        return { lon: Number(parts[0]), lat: Number(parts[1] ?? parts[0]) };
-      });
-      if (points.length < 2) throw new Error(t("路线至少需要 2 个点（每行：经度, 纬度）", "Need at least 2 points (lon, lat per line)"));
+      const lines = pointsText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const points = lines.map((line) => { const parts = line.split(","); return { lon: Number(parts[0]), lat: Number(parts[1] ?? parts[0]) }; });
+      if (points.length < 2) throw new Error(t("路线至少需要 2 个点（每行：经度, 纬度）", "Need ≥2 points (lon, lat per line)"));
       const source = readActiveGisSource();
-      await jfetch(`/devices/${routeFor.id}/route`, {
-        method: "PUT",
-        body: JSON.stringify({ source: source ? { kind: source.kind, id: source.id, name: source.name } : null, points }),
-      });
+      await jfetch(`/devices/${routeFor.id}/route`, { method: "PUT", body: JSON.stringify({ source: source ? { kind: source.kind, id: source.id, name: source.name } : null, points }) });
       setRouteFor(null);
       setNotice({ kind: "success", text: t(`巡航路线已保存（${points.length} 个点）`, `Cruise route saved (${points.length} pts)`) });
     } catch (err) {
@@ -436,168 +501,13 @@ export default function DevicesPage() {
     }
   };
 
-  // ---------- 基站 ----------
-  const saveStation = async (): Promise<void> => {
-    if (!stationPick) {
-      setNotice({ kind: "error", text: t("请先在地图上点选基站位置", "Click the map to place the station first") });
-      return;
-    }
-    setBusy(true);
-    try {
-      const payload = {
-        name: stationForm.name.trim(),
-        lon: Number(stationPick.lon.toFixed(6)),
-        lat: Number(stationPick.lat.toFixed(6)),
-        purpose: stationForm.purpose,
-        description: stationForm.description.trim() || null,
-      };
-      if (stationDialog === "new") await jfetch("/base-stations", { method: "POST", body: JSON.stringify(payload) });
-      else if (stationDialog) await jfetch(`/base-stations/${stationDialog.id}`, { method: "PATCH", body: JSON.stringify(payload) });
-      setStationDialog(null);
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** 打开基站对话框：同步当前 GIS 数据源作为点选底图 */
-  const openStationDialog = async (station: StationItem | "new"): Promise<void> => {
-    setStationDialog(station);
-    setStationPick(station === "new" ? null : { lon: station.lon, lat: station.lat });
-    setStationForm({
-      name: station === "new" ? t(`基站 ${(stations?.length ?? 0) + 1}`, `Station ${(stations?.length ?? 0) + 1}`) : station.name,
-      purpose: station === "new" ? "charging" : station.purpose,
-      description: station === "new" ? "" : station.description ?? "",
-    });
-    const source = readActiveGisSource();
-    if (!source) {
-      setStationLines([]);
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/data-files/${source.id}/content`, { credentials: "include" });
-      if (res.ok) setStationLines(extractGeoLines((await res.json()) as unknown));
-    } catch {
-      /* 底图加载失败不阻塞点选 */
-    }
-  };
-
-  // 点选地图：支持缩放/平移/点击选点
-  const stationViewRef = useRef<PickerView>({ zoom: 1, tx: 0, ty: 0 });
-  const stationDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
-
-  const repaintPicker = (): void => {
-    const cv = stationCanvasRef.current;
-    if (cv) paintStationPicker(cv, stationLines, stationPick, stationViewRef.current);
-  };
-
-  // 打开对话框 / 更换底图：重置视图、绘制并挂载滚轮缩放（原生非被动，可阻止页面滚动）
-  useEffect(() => {
-    const cv = stationCanvasRef.current;
-    if (!cv || stationDialog === null) return;
-    stationViewRef.current = { zoom: 1, tx: 0, ty: 0 };
-    const frame = requestAnimationFrame(repaintPicker);
-    const wheelHandler = (ev: WheelEvent): void => {
-      ev.preventDefault();
-      zoomStationAt(ev.clientX, ev.clientY, ev.deltaY);
-    };
-    cv.addEventListener("wheel", wheelHandler, { passive: false });
-    return () => {
-      cancelAnimationFrame(frame);
-      cv.removeEventListener("wheel", wheelHandler);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stationDialog, stationLines]);
-
-  const zoomStationAt = (clientX: number, clientY: number, deltaY: number): void => {
-    const cv = stationCanvasRef.current;
-    if (!cv) return;
-    const rect = cv.getBoundingClientRect();
-    const W = Math.max(1, rect.width || 1);
-    const H = Math.max(1, rect.height || 1);
-    const cssX = clientX - rect.left;
-    const cssY = clientY - rect.top;
-    const v = stationViewRef.current;
-    const factor = deltaY < 0 ? 1.18 : 1 / 1.18;
-    const nextZoom = Math.min(24, Math.max(0.3, v.zoom * factor));
-    if (Math.abs(nextZoom - v.zoom) < 0.0001) return;
-    const cxx = cssX - W / 2;
-    const cyy = cssY - H / 2;
-    const baseX = (cxx - v.tx) / v.zoom;
-    const baseY = (cyy - v.ty) / v.zoom;
-    v.zoom = nextZoom;
-    v.tx = cxx - baseX * nextZoom;
-    v.ty = cyy - baseY * nextZoom;
-    repaintPicker();
-  };
-
-  // 选点变化后重绘（保留当前缩放/平移）
-  useEffect(() => {
-    if (stationDialog === null) return;
-    const frame = requestAnimationFrame(repaintPicker);
-    return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stationPick]);
-
-  const onStationPointerDown = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (event.button !== 0) return;
-    (event.currentTarget as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
-    stationDragRef.current = { x: event.clientX, y: event.clientY, moved: false };
-  };
-
-  const onStationPointerMove = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    const drag = stationDragRef.current;
-    if (!drag) return;
-    const dx = event.clientX - drag.x;
-    const dy = event.clientY - drag.y;
-    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    if (drag.moved) {
-      const v = stationViewRef.current;
-      v.tx += dx;
-      v.ty += dy;
-      stationDragRef.current = { x: event.clientX, y: event.clientY, moved: true };
-      repaintPicker();
-    }
-  };
-
-  const onStationPointerUp = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    const cv = stationCanvasRef.current;
-    const drag = stationDragRef.current;
-    stationDragRef.current = null;
-    if (!cv || !drag || drag.moved) return;
-    const rect = cv.getBoundingClientRect();
-    const cssX = event.clientX - rect.left;
-    const cssY = event.clientY - rect.top;
-    const p = pickerFromCss(stationLines, Math.max(1, rect.width || 1), Math.max(1, rect.height || 1), stationViewRef.current, cssX, cssY);
-    setStationPick({ lon: p.lon, lat: p.lat });
-  };
-
-  const onStationPointerCancel = (): void => {
-    stationDragRef.current = null;
-  };
-
-  const removeStation = async (station: StationItem): Promise<void> => {
-    if (!globalThis.confirm(t(`删除基站“${station.name}”？`, `Delete station "${station.name}"?`))) return;
-    try {
-      await jfetch(`/base-stations/${station.id}`, { method: "DELETE" });
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    }
-  };
-
   const copyText = async (text: string, key: "secret" | "curl"): Promise<void> => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(key);
       window.setTimeout(() => setCopied(null), 1400);
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   };
-
   const secretCurl = (id: number, secret: string): string =>
     `curl -X POST 'http://localhost:3001/api/devices/${id}/telemetry' \\\n  -H 'Content-Type: application/json' \\\n  -H 'x-device-key: ${secret}' \\\n  -d '{"lon":126.9,"lat":46.61,"speed":1.2}'`;
 
@@ -611,15 +521,26 @@ export default function DevicesPage() {
     return map[status] ?? map.offline;
   };
 
-  const pillBtn = {
-    borderRadius: "999px",
-    textTransform: "none" as const,
-    fontSize: 12,
-  };
-  const ghost = (color = "var(--pm-color-text-secondary)") => ({
-    color,
-    "&:hover": { backgroundColor: "var(--pm-color-primary-soft)", color: "#1664ff" },
-  });
+  const counts = useMemo(() => {
+    const list = devices ?? [];
+    return {
+      total: list.length,
+      crawler: list.filter((d) => d.type === "crawler" && d.state !== "revoked").length,
+      drone: list.filter((d) => d.type === "drone" && d.state !== "revoked").length,
+      pending: list.filter((d) => d.state === "pending").length,
+      approved: list.filter((d) => d.state === "approved").length,
+      stations: stations?.length ?? 0,
+    };
+  }, [devices, stations]);
+
+  const orderedDevices = useMemo(() => {
+    const order: Record<string, number> = { pending: 0, approved: 1, rejected: 2, revoked: 3 };
+    const list = devices ?? [];
+    return [...list].sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.createdAt.localeCompare(b.createdAt));
+  }, [devices]);
+
+  const pillBtn = { borderRadius: "999px", textTransform: "none" as const, fontSize: 12 };
+  const ghost = (color = "var(--pm-color-text-secondary)") => ({ color, "&:hover": { backgroundColor: "var(--pm-color-primary-soft)", color: "#1664ff" } });
 
   return (
     <ThemeProvider theme={pmTheme}>
@@ -630,14 +551,9 @@ export default function DevicesPage() {
               <Typography sx={{ fontSize: 22, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>{T.title[lang]}</Typography>
               <Typography sx={{ mt: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>{T.subtitle[lang]}</Typography>
             </Box>
-            <Stack direction="row" spacing={1}>
-              <Button size="small" variant="outlined" startIcon={<RefreshRounded sx={{ fontSize: 15 }} />} onClick={() => void refresh()} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
-                {zh ? "刷新" : "Refresh"}
-              </Button>
-              <Button size="small" variant="outlined" startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />} onClick={() => void openStationDialog("new")} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
-                {zh ? "新建基站" : "Add station"}
-              </Button>
-            </Stack>
+            <Button size="small" variant="outlined" startIcon={<RefreshRounded sx={{ fontSize: 15 }} />} onClick={() => void refresh()} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
+              {zh ? "刷新" : "Refresh"}
+            </Button>
           </Stack>
 
           {devices === null || stations === null ? (
@@ -646,30 +562,99 @@ export default function DevicesPage() {
             </Stack>
           ) : (
             <>
-              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", px: { xs: 2.5, sm: 4 }, py: { xs: 2.5, sm: 3 }, mb: 4 }}>
+              {/* 数据统计 */}
+              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", px: { xs: 2.5, sm: 4 }, py: { xs: 2.5, sm: 3 }, mb: 3 }}>
                 <Stack direction="row" sx={{ alignItems: "stretch" }}>
                   <StatCell label={zh ? "设备总数" : "Total"} value={String(counts.total)} />
                   <StatCell label={zh ? "管道机器人" : "Crawlers"} value={String(counts.crawler)} />
                   <StatCell label={zh ? "无人机" : "Drones"} value={String(counts.drone)} />
-                  <StatCell label={zh ? "已注册" : "Approved"} value={String(counts.approved)} last={false} />
-                  <StatCell label={zh ? "待审批" : "Pending"} value={String(counts.pending)} last />
+                  <StatCell label={zh ? "已注册" : "Approved"} value={String(counts.approved)} />
+                  <StatCell label={zh ? "待审批" : "Pending"} value={String(counts.pending)} />
+                  <StatCell label={zh ? "基站" : "Stations"} value={String(counts.stations)} last />
                 </Stack>
               </Paper>
 
+              {/* 基站地图（统计正下方）：右键新建 / 左键选中编辑删除 */}
+              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden", mb: 4 }}>
+                <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", px: { xs: 2.5, sm: 3 }, py: 1.75, borderBottom: "1px solid var(--pm-color-divider)" }}>
+                  <CellTowerRounded sx={{ fontSize: 18, color: "#1664ff" }} />
+                  <Typography sx={{ flex: 1, fontSize: 15, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>
+                    {zh ? "基站规划地图" : "Base station map"}
+                  </Typography>
+                  <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>
+                    {zh ? "右键新建 · 左键选中编辑/删除 · 滚轮缩放/拖拽平移" : "Right-click to add · left-click to edit/delete · wheel/drag to navigate"}
+                  </Typography>
+                </Stack>
+                <Box sx={{ position: "relative", height: 420 }}>
+                  <canvas
+                    ref={mapCanvasRef}
+                    style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
+                    onPointerDown={onMapDown}
+                    onPointerMove={onMapMove}
+                    onPointerUp={onMapUp}
+                    onPointerCancel={onMapCancel}
+                    onContextMenu={(e) => { e.preventDefault(); onCreateStation(e.clientX, e.clientY); }}
+                  />
+                  {selectedStation && (
+                    <Paper
+                      elevation={0}
+                      variant="outlined"
+                      sx={{
+                        position: "absolute",
+                        right: 14,
+                        top: 14,
+                        width: 264,
+                        p: 1.5,
+                        borderRadius: "12px",
+                        borderColor: "var(--pm-color-primary)",
+                        backgroundColor: "rgba(255,255,255,0.97)",
+                        boxShadow: "0 10px 30px rgb(16 24 40 / 0.14)",
+                      }}
+                    >
+                      <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1 }}>
+                        <CellTowerRounded sx={{ fontSize: 17, color: "#1664ff" }} />
+                        <Typography sx={{ flex: 1, fontSize: 13.5, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>
+                          {selectedStation.name}
+                        </Typography>
+                        <IconButton size="small" onClick={() => setSelectedStation(null)} sx={ghost()}><CloseRounded sx={{ fontSize: 17 }} /></IconButton>
+                      </Stack>
+                      <Stack spacing={1}>
+                        <TextField size="small" label={t("名称", "Name")} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+                        <Select size="small" value={draft.purpose} onChange={(e) => setDraft({ ...draft, purpose: e.target.value })}>
+                          <MenuItem value="charging">{t("充电站", "Charging")}</MenuItem>
+                          <MenuItem value="relay">{t("中继站", "Relay")}</MenuItem>
+                          <MenuItem value="command">{t("指挥站", "Command")}</MenuItem>
+                        </Select>
+                        <TextField size="small" label={t("备注", "Note")} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+                        <Typography sx={{ fontSize: 11, fontFamily: "Consolas, monospace", color: "var(--pm-color-text-hint)" }}>
+                          {selectedStation.lon.toFixed(6)}, {selectedStation.lat.toFixed(6)}
+                        </Typography>
+                        <Stack direction="row" spacing={1}>
+                          <Button size="small" variant="contained" disableElevation startIcon={<SaveOutlined sx={{ fontSize: 15 }} />} disabled={busy || !draft.name.trim()} onClick={() => void saveSelectedStation()} sx={{ ...pillBtn, flex: 1, color: "#fff", backgroundColor: "#1664ff" }}>
+                            {t("保存", "Save")}
+                          </Button>
+                          <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeSelectedStation()} sx={{ color: "#cf1322", "&:hover": { backgroundColor: "rgba(207,19,34,0.08)" } }}>
+                            <DeleteOutlineRounded sx={{ fontSize: 18 }} />
+                          </IconButton>
+                        </Stack>
+                      </Stack>
+                    </Paper>
+                  )}
+                </Box>
+              </Paper>
+
+              {/* 设备列表 */}
               <Stack direction="row" spacing={1.5} sx={{ alignItems: "baseline", mb: 1.5 }}>
-                <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>
-                  {zh ? "设备" : "Devices"}
-                </Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{zh ? "设备" : "Devices"}</Typography>
                 <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>
-                  {zh ? "待审批设备请点「同意」并配置一次性密钥" : "Approve pending devices to issue their one-time secret"}
+                  {zh ? "待审批设备点「同意」并配置一次性密钥" : "Approve pending devices to issue their one-time secret"}
                 </Typography>
               </Stack>
-
-              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden", mb: 4 }}>
+              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden" }}>
                 {orderedDevices.length === 0 ? (
                   <Box sx={{ p: 5, textAlign: "center" }}>
                     <Typography sx={{ fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                      {zh ? "暂无设备。设备端通过 POST /api/devices/register 发起入网申请，待审批的设备将出现在此处。" : "No devices yet. Devices apply via POST /api/devices/register; pending requests appear here."}
+                      {zh ? "暂无设备。设备端通过 POST /api/devices/register 发起入网申请。" : "No devices yet. Devices apply via POST /api/devices/register."}
                     </Typography>
                   </Box>
                 ) : (
@@ -698,26 +683,20 @@ export default function DevicesPage() {
                               <Typography sx={{ mt: 0.25, fontSize: 12, color: "var(--pm-color-text-hint)" }}>
                                 {device.type === "crawler" ? t("管道机器人", "Crawler") : t("无人机", "Drone")}
                                 {device.description ? ` · ${device.description}` : ""}
-                                {device.state === "approved" && device.registeredAt
-                                  ? ` · ${t("接入于", "Joined")} ${new Date(device.registeredAt).toLocaleString(zh ? "zh-CN" : "en-US", { hour12: false })}`
-                                  : device.state === "pending"
-                                    ? ` · ${t("等待审批…", "Awaiting approval…")}`
-                                    : ""}
                               </Typography>
                             </Box>
-
                             {device.state === "pending" ? (
                               <Stack direction="row" spacing={1}>
                                 <Button size="small" variant="contained" disableElevation startIcon={<CheckRounded sx={{ fontSize: 15 }} />} disabled={busy} onClick={() => void approveDevice(device)} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff", "&:hover": { backgroundColor: "#0f54d6" } }}>
                                   {zh ? "同意" : "Approve"}
                                 </Button>
-                                <Button size="small" variant="outlined" startIcon={<CloseRounded sx={{ fontSize: 15 }} />} onClick={() => void rejectDevice(device)} sx={{ ...pillBtn, color: "#cf1322", borderColor: "rgba(207,19,34,0.35)", "&:hover": { borderColor: "#cf1322", backgroundColor: "rgba(207,19,34,0.04)" } }}>
+                                <Button size="small" variant="outlined" startIcon={<CloseRounded sx={{ fontSize: 15 }} />} onClick={() => void rejectDevice(device)} sx={{ ...pillBtn, color: "#cf1322", borderColor: "rgba(207,19,34,0.35)" }}>
                                   {zh ? "拒绝" : "Reject"}
                                 </Button>
                               </Stack>
                             ) : device.state === "approved" ? (
                               <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
-                                <IconButton size="small" title={t("规划巡航路线", "Plan cruise route")} onClick={() => void openRoute(device)} sx={ghost("#1664ff")}><RouteRounded sx={{ fontSize: 19 }} /></IconButton>
+                                <IconButton size="small" title={t("巡航路线", "Route")} onClick={() => void openRoute(device)} sx={ghost("#1664ff")}><RouteRounded sx={{ fontSize: 19 }} /></IconButton>
                                 <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setEditing(device); setEditForm({ name: device.name, description: device.description ?? "" }); }} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
                                 <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeDevice(device)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
                               </Stack>
@@ -731,45 +710,6 @@ export default function DevicesPage() {
                   })
                 )}
               </Paper>
-
-              <Stack direction="row" spacing={1.5} sx={{ alignItems: "baseline", mb: 1.5 }}>
-                <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{zh ? "基站" : "Base stations"}</Typography>
-                <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>{zh ? "用于路径推算与指令下发：点「新建基站」在地图上点选即可" : "For routing & commands: “Add station” and pick a point on the map"}</Typography>
-              </Stack>
-              <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden" }}>
-                {stations.length === 0 ? (
-                  <Box sx={{ p: 5, textAlign: "center" }}>
-                    <Typography sx={{ fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                      {zh ? "尚未规划基站：点击右上角「新建基站」，在地图上点选位置即可放置" : "No base stations yet. Click “Add station” and pick a location on the map."}
-                    </Typography>
-                  </Box>
-                ) : (
-                  stations.map((station, index) => (
-                    <Box key={station.id}>
-                      {index > 0 && <Divider sx={{ mx: 3, borderColor: "var(--pm-color-divider)" }} />}
-                      <Box sx={{ px: { xs: 2.5, sm: 3 }, py: 1.75 }}>
-                        <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
-                          <Box sx={{ width: 38, height: 38, flexShrink: 0, borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }}>
-                            <CellTowerRounded sx={{ fontSize: 20 }} />
-                          </Box>
-                          <Box sx={{ flex: 1, minWidth: 0 }}>
-                            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                              <Typography sx={{ fontSize: 15, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{station.name}</Typography>
-                              <Chip size="small" label={station.purpose === "charging" ? t("充电站", "Charging") : station.purpose === "relay" ? t("中继站", "Relay") : t("指挥站", "Command")} sx={{ height: 20, fontSize: 10.5, color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }} />
-                            </Stack>
-                            <Typography sx={{ mt: 0.25, fontSize: 12, fontFamily: "Consolas, monospace", color: "var(--pm-color-text-hint)" }}>
-                              {station.lon.toFixed(6)}, {station.lat.toFixed(6)}
-                              {station.description ? ` · ${station.description}` : ""}
-                            </Typography>
-                          </Box>
-                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => void openStationDialog(station)} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
-                          <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeStation(station)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
-                        </Stack>
-                      </Box>
-                    </Box>
-                  ))
-                )}
-              </Paper>
             </>
           )}
 
@@ -780,21 +720,18 @@ export default function DevicesPage() {
               {secretDialog && (
                 <Stack spacing={1.5}>
                   <Alert severity="success" sx={{ borderRadius: "12px" }}>
-                    {zh
-                      ? `已同意「${secretDialog.name}」入网。设备密钥仅显示这一次，请立即配置到设备并妥善保存。`
-                      : `"${secretDialog.name}" approved. The secret is shown only once — configure it on the device now.`}
+                    {zh ? `已同意「${secretDialog.name}」入网。设备密钥仅显示这一次，请立即配置到设备并妥善保存。` : `"${secretDialog.name}" approved. The secret is shown only once.`}
                   </Alert>
                   <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                    <Typography sx={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "var(--pm-color-text-secondary)" }}>{zh ? "设备密钥 x-device-key" : "Device secret"}</Typography>
+                    <Typography sx={{ flex: 1, fontSize: 12.5, fontWeight: 700 }}>{zh ? "设备密钥 x-device-key" : "Device secret"}</Typography>
                     <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretDialog.secret, "secret")} sx={pillBtn}>
                       {copied === "secret" ? t("已复制", "Copied") : t("复制", "Copy")}
                     </Button>
                   </Stack>
-                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#0f172a", color: "#9be8c6", fontSize: 12.5, lineHeight: 1.6, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace", userSelect: "all" }}>
+                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#0f172a", color: "#9be8c6", fontSize: 12.5, overflowX: "auto", userSelect: "all", fontFamily: "Consolas, 'SF Mono', monospace" }}>
                     {secretDialog.secret}
                   </Box>
-                  <Typography sx={{ fontSize: 12, fontWeight: 600, color: "var(--pm-color-text-hint)" }}>{zh ? "设备上报示例" : "Telemetry example"}</Typography>
-                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#f8f9fb", border: "1px solid var(--pm-color-border)", fontSize: 11.5, lineHeight: 1.6, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace" }}>
+                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#f8f9fb", border: "1px solid var(--pm-color-border)", fontSize: 11.5, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace" }}>
                     {secretCurl(secretDialog.id, secretDialog.secret)}
                   </Box>
                   <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretCurl(secretDialog.id, secretDialog.secret), "curl")} sx={{ ...pillBtn, alignSelf: "flex-start" }}>
@@ -804,9 +741,7 @@ export default function DevicesPage() {
               )}
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" variant="contained" disableElevation onClick={() => setSecretDialog(null)} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>
-                {t("我已保存", "Saved")}
-              </Button>
+              <Button size="small" variant="contained" disableElevation onClick={() => setSecretDialog(null)} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("我已保存", "Saved")}</Button>
             </DialogActions>
           </Dialog>
 
@@ -834,10 +769,7 @@ export default function DevicesPage() {
             <DialogContent>
               <Stack spacing={1.5}>
                 <Alert severity="info" sx={{ borderRadius: "12px" }}>
-                  {t(
-                    `路线来源（当前 GIS 数据源）：${routeSourceName || "未选择"}。可基于数据源自动生成（沿管网取点），或手动逐行填“经度, 纬度”。`,
-                    `Source: ${routeSourceName || "none"}. Generate along the network automatically, or type one lon, lat per line.`,
-                  )}
+                  {t(`路线来源（当前数据源）：${routeSourceName || "未选择"}。可基于数据源自动生成（沿管网取点），或手动逐行填“经度, 纬度”。`, `Source: ${routeSourceName || "none"}. Generate along the network automatically, or type lon, lat per line.`)}
                 </Alert>
                 <Stack direction="row" spacing={1}>
                   <Button size="small" variant="outlined" disabled={busy} onClick={() => void generateFromSource()} sx={pillBtn}>{t("基于当前数据源自动生成", "Generate from active source")}</Button>
@@ -847,84 +779,19 @@ export default function DevicesPage() {
                   size="small"
                   label={t("路线点列（每行：经度, 纬度）", "Points (lon, lat per line)")}
                   multiline
-                  minRows={10}
+                  minRows={9}
                   value={pointsText}
                   onChange={(e) => setPointsText(e.target.value)}
                   slotProps={{ input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } } }}
                 />
                 <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>
-                  {pointsText.trim()
-                    ? `${pointsText.trim().split(/\r?\n/).filter(Boolean).length} ${t("个航点", "waypoints")}`
-                    : t("尚未生成航点", "No waypoints yet")}
+                  {pointsText.trim() ? `${pointsText.trim().split(/\r?\n/).filter(Boolean).length} ${t("个航点", "waypoints")}` : t("尚未生成航点", "No waypoints yet")}
                 </Typography>
               </Stack>
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
               <Button size="small" onClick={() => setRouteFor(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
               <Button size="small" variant="contained" disableElevation disabled={busy} onClick={() => void saveRoute()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存巡航路线", "Save route")}</Button>
-            </DialogActions>
-          </Dialog>
-
-          {/* 基站（地图点选） */}
-          <Dialog open={stationDialog !== null} onClose={() => setStationDialog(null)} maxWidth="sm" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
-              {stationDialog === "new" ? t("新建基站 · 地图点选", "Add station · pick on map") : t("编辑基站 · 地图点选", "Edit station · pick on map")}
-            </DialogTitle>
-            <DialogContent>
-              <Stack spacing={1.5}>
-                <Box
-                  sx={{
-                    position: "relative",
-                    height: 300,
-                    borderRadius: "12px",
-                    overflow: "hidden",
-                    border: "1px solid var(--pm-color-border)",
-                  }}
-                >
-                  <canvas
-                    ref={stationCanvasRef}
-                    style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
-                    onPointerDown={onStationPointerDown}
-                    onPointerMove={onStationPointerMove}
-                    onPointerUp={onStationPointerUp}
-                    onPointerCancel={onStationPointerCancel}
-                  />
-                  <Box
-                    sx={{
-                      position: "absolute",
-                      left: 10,
-                      top: 10,
-                      px: 1,
-                      py: 0.25,
-                      borderRadius: "8px",
-                      backgroundColor: "rgba(255,255,255,0.92)",
-                      fontSize: 11,
-                      color: "var(--pm-color-text-hint)",
-                      pointerEvents: "none",
-                    }}
-                  >
-                    {zh ? "滚轮缩放 · 拖拽平移 · 单击选点" : "Scroll to zoom · drag to pan · click to pick"}
-                  </Box>
-                </Box>
-                <Alert severity={stationPick ? "success" : "warning"} sx={{ borderRadius: "10px" }}>
-                  {stationPick
-                    ? `${zh ? "已选位置" : "Position"}: ${stationPick.lon.toFixed(6)}, ${stationPick.lat.toFixed(6)}`
-                    : zh
-                      ? "尚未选点：请在上方地图中点击基站所在位置"
-                      : "No point yet: click the map to choose the station location"}
-                </Alert>
-                <TextField size="small" label={t("名称", "Name")} value={stationForm.name} onChange={(e) => setStationForm({ ...stationForm, name: e.target.value })} />
-                <Select size="small" value={stationForm.purpose} onChange={(e) => setStationForm({ ...stationForm, purpose: e.target.value })}>
-                  <MenuItem value="charging">{t("充电站", "Charging")}</MenuItem>
-                  <MenuItem value="relay">{t("中继站", "Relay")}</MenuItem>
-                  <MenuItem value="command">{t("指挥站", "Command")}</MenuItem>
-                </Select>
-                <TextField size="small" label={t("备注", "Note")} value={stationForm.description} onChange={(e) => setStationForm({ ...stationForm, description: e.target.value })} />
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" onClick={() => setStationDialog(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy || !stationForm.name.trim() || !stationPick} onClick={() => void saveStation()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存", "Save")}</Button>
             </DialogActions>
           </Dialog>
 
