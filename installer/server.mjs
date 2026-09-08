@@ -180,7 +180,15 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (pathname === "/api/reset" && req.method === "POST") {
-      // 清除缓存重来：停止服务并删除安装器生成的配置/运行状态（不动数据库与依赖目录）
+      // 清除缓存重来：取消进行中/暂停中的任务、停止服务，删除安装器生成的配置与运行状态
+      // （不动数据库与依赖目录）。任务被取消后，/api/install/active 即返回无活动任务。
+      const target = activeJob;
+      if (target) {
+        target.cancel();
+        target.status = "cancelled";
+      }
+      jobs.clear();
+      activeJob = null;
       services.stop();
       const targets = [
         join(BACKEND, ".env"),
@@ -194,7 +202,7 @@ const server = createServer(async (req, res) => {
           /* 忽略单文件清理失败 */
         }
       }
-      sendJson(res, 200, { ok: true, installed: isInstalled() });
+      sendJson(res, 200, { ok: true, cancelled: !!target, installed: isInstalled() });
       return;
     }
     if (pathname === "/api/logs" && req.method === "GET") {

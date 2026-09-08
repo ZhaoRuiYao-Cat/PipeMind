@@ -95,6 +95,18 @@ export class InstallJob {
     this.pushLog("收到暂停请求：当前步骤将被中断，可在准备就绪后继续。", "warn");
   }
 
+  // 取消（清除缓存重来）：终止等待中的暂停/步骤循环，并中断在跑的子进程
+  cancel() {
+    this.cancelled = true;
+    this.pauseRequested = false;
+    this.paused = false;
+    if (this.activeChild) {
+      killTree(this.activeChild);
+      this.activeChild = null;
+    }
+    this.pushLog("任务已取消（清除缓存重来）…", "warn");
+  }
+
   resume() {
     if (!this.pauseRequested && this.status !== "paused") return;
     this.pauseRequested = false;
@@ -130,15 +142,23 @@ export class InstallJob {
             this.pushLog(`安装已暂停（将从「${STEPS[i].label}」继续）。`, "warn");
           }
           await this.waitWhilePaused();
+          if (this.cancelled) {
+            this.status = "cancelled";
+            return;
+          }
           this.status = "running";
         }
         const completed = await this.execStepSafe(i, steps[i]);
         if (!completed) {
-          // 步骤执行中被暂停中断：等待继续后原地重跑
+          // 步骤执行中被暂停/取消中断：等待继续后原地重跑，或直接结束
           this.paused = true;
           this.status = "paused";
           this.current = i;
           await this.waitWhilePaused();
+          if (this.cancelled) {
+            this.status = "cancelled";
+            return;
+          }
           this.status = "running";
           this.stepState[i] = "pending";
           continue;
@@ -149,13 +169,20 @@ export class InstallJob {
       this.status = "done";
       this.current = -1;
     } catch (err) {
-      this.status = "error";
-      this.error = err instanceof Error ? err.message : String(err);
-      this.pushLog(`[install] 失败：${this.error}`, "error");
-      services.stop();
+      if (this.cancelled) {
+        this.status = "cancelled";
+      } else {
+        this.status = "error";
+        this.error = err instanceof Error ? err.message : String(err);
+        this.pushLog(`[install] 失败：${this.error}`, "error");
+        services.stop();
+      }
     } finally {
       this.finishedAt = now();
       this.activeChild = null;
+      if (!["done", "error", "cancelled"].includes(this.status)) {
+        this.status = "paused";
+      }
     }
   }
 
@@ -175,6 +202,10 @@ export class InstallJob {
       await fn();
       return true;
     } catch (err) {
+      if (this.cancelled) {
+        this.stepState[index] = "cancelled";
+        throw err;
+      }
       if (this.pauseRequested) {
         this.stepState[index] = "paused";
         this.pushLog(`步骤「${STEPS[index].label}」已中断，等待继续…`, "warn");
@@ -244,7 +275,7 @@ export class InstallJob {
       });
       this.pushLog(`[${tag}] 依赖安装完成`);
     } catch (err) {
-      if (this.pauseRequested) throw err;
+      if (this.pauseRequested || this.cancelled) throw err;
       this.pushLog(`[${tag}] npm ci 失败，改用 npm install：${err.message}`, "warn");
       await run(npmCmd, ["install", "--no-audit", "--no-fund"], {
         cwd,

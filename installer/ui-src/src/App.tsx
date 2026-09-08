@@ -57,6 +57,7 @@ export default function App() {
   const [checks, setChecks] = useState<Checks | null>(null);
   const [checksLoading, setChecksLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ kind: "success" | "info"; text: string } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [job, setJob] = useState<JobSnapshot | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -133,14 +134,34 @@ export default function App() {
     setActiveStep(step);
   }
 
+  // 成功/提示自动消失
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
   async function clearAndReset() {
     setInstalledAction("resetting");
     setError(null);
+    setNotice(null);
+    stopPolling(); // 立即停止旧任务的轮询
     try {
-      await api.reset();
+      const res = await api.reset();
+      // 重置页面状态：清空任务、回到第一页（环境检查）
+      setJob(null);
+      setInstalling(false);
       const m = await api.meta();
       setMeta(m);
       setInstalledAction("ask");
+      setNavDir("back");
+      setActiveStep(0);
+      setNotice({
+        kind: res.cancelled ? "info" : "success",
+        text: res.cancelled
+          ? "安装任务已取消并清除缓存，已回到全新安装流程。"
+          : "缓存已清除，已回到全新安装流程。",
+      });
       void runChecks();
     } catch (err) {
       setInstalledAction("ask");
@@ -163,10 +184,17 @@ export default function App() {
         try {
           const snap = await api.job(id);
           setJob(snap);
-          if (snap.status === "done" || snap.status === "error") {
+          if (snap.status === "done" || snap.status === "error" || snap.status === "cancelled") {
             stopPolling();
             setInstalling(false);
-            if (snap.status === "done") goTo(3, "next");
+            if (snap.status === "done") {
+              goTo(3, "next");
+            } else if (snap.status === "cancelled") {
+              // 任务被"清除缓存重来"取消：清空任务状态并回到首页
+              setJob(null);
+              setNotice({ kind: "info", text: "安装任务已取消，可重新开始安装。" });
+              goTo(0, "back");
+            }
           }
         } catch {
           /* 轮询失败继续重试 */
@@ -348,6 +376,11 @@ export default function App() {
           </Alert>
         )}
 
+        {notice && (
+          <Alert severity={notice.kind} sx={{ mb: 2 }} onClose={() => setNotice(null)}>
+            {notice.text}
+          </Alert>
+        )}
         {error && (
           <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
             {error}

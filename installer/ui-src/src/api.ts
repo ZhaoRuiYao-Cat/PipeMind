@@ -36,7 +36,7 @@ export interface StepState {
 
 export interface JobSnapshot {
   id: string;
-  status: "queued" | "running" | "paused" | "done" | "error";
+  status: "queued" | "running" | "paused" | "done" | "error" | "cancelled";
   paused: boolean;
   error: string | null;
   current: number;
@@ -89,5 +89,6 @@ export const api = {
   start: (opts: { backendPort?: string; frontendPort?: string }) =>
     fetchJson<{ ok: boolean }>("/api/start", { method: "POST", body: JSON.stringify(opts) }),
   stop: () => fetchJson<{ ok: boolean }>("/api/stop", { method: "POST", body: "{}" }),
-  reset: () => fetchJson<{ ok: boolean; installed: boolean }>("/api/reset", { method: "POST", body: "{}" }),
+  reset: () =>
+    fetchJson<{ ok: boolean; cancelled: boolean; installed: boolean }>("/api/reset", { method: "POST", body: "{}" }),
 };
