@@ -1,7 +1,7 @@
 "use client";
 
 // 设备与基站：设备发起注册 → 管理端审批（同意签发一次性密钥/拒绝），巡航路线、基站管理
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ThemeProvider } from "@mui/material/styles";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -53,6 +53,122 @@ interface StationItem {
   lat: number;
   purpose: string;
   description: string | null;
+}
+
+/** 从 GeoJSON 提取管线坐标段（用于“地图点选基站”的背景底图） */
+function extractGeoLines(raw: unknown): number[][][] {
+  const lines: number[][][] = [];
+  const fc = raw as { features?: Array<{ geometry?: { type?: string; coordinates?: unknown } }> };
+  if (!fc?.features) return lines;
+  for (const feature of fc.features) {
+    const g = feature.geometry;
+    if (!g) continue;
+    const push = (coord: unknown): void => {
+      if (!Array.isArray(coord)) return;
+      const line = coord
+        .filter((c): c is number[] => Array.isArray(c) && c.length >= 2)
+        .map((c) => [Number(c[0]), Number(c[1])]);
+      if (line.length >= 2) lines.push(line);
+    };
+    if (g.type === "MultiLineString" && Array.isArray(g.coordinates)) {
+      (g.coordinates as unknown[]).forEach(push);
+    } else if (g.type === "LineString") {
+      push(g.coordinates);
+    }
+  }
+  return lines;
+}
+
+/** 简易等经纬度投影：返回把经纬度映射到画布像素的坐标函数（含余纬余弦修正） */
+function makeProjector(
+  lines: number[][][],
+  width: number,
+  height: number,
+  pad = 30,
+): { px: (lon: number, lat: number) => [number, number]; hasData: boolean } {
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  const visit = (lon: number, lat: number): void => {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  };
+  for (const line of lines) for (const [lon, lat] of line) visit(lon, lat);
+  const hasData = Number.isFinite(minLon);
+  if (!hasData) {
+    minLon = 126.5; maxLon = 127.5; minLat = 46.3; maxLat = 46.9;
+  }
+  const cos = Math.cos(((minLat + maxLat) / 2) * Math.PI / 180);
+  const spanLonM = (maxLon - minLon) * 111320 * cos;
+  const spanLatM = (maxLat - minLat) * 110540;
+  const scale = Math.min((width - pad * 2) / Math.max(spanLonM, 1), (height - pad * 2) / Math.max(spanLatM, 1));
+  const px = (lon: number, lat: number): [number, number] => {
+    const x = pad + (lon - minLon) * 111320 * cos * scale;
+    const y = pad + (maxLat - lat) * 110540 * scale;
+    return [x, y];
+  };
+  return { px, hasData };
+}
+
+/** 画“地图点选”底图：管线 + 已选点 */
+function paintStationPicker(
+  canvas: HTMLCanvasElement,
+  lines: number[][][],
+  pick: { lon: number; lat: number } | null,
+): { projector: (lon: number, lat: number) => [number, number] } {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(rect.width * dpr));
+  const h = Math.max(1, Math.round(rect.height * dpr));
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  const { px } = makeProjector(lines, w, h);
+  const cssW = rect.width || 1;
+  if (!ctx) return { projector: px };
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, h / dpr);
+  // 网格
+  ctx.strokeStyle = "#eef2f7";
+  ctx.lineWidth = 1;
+  for (let i = 0; i < cssW; i += 40) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, h / dpr); ctx.stroke();
+  }
+  for (let i = 0; i < h / dpr; i += 40) {
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(cssW, i); ctx.stroke();
+  }
+  // 管线
+  ctx.lineCap = "round";
+  for (const line of lines) {
+    ctx.strokeStyle = "#8fb7ff";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    line.forEach(([lon, lat], i) => {
+      const [x, y] = px(lon, lat);
+      if (i === 0) ctx.moveTo(x / dpr, y / dpr);
+      else ctx.lineTo(x / dpr, y / dpr);
+    });
+    ctx.stroke();
+  }
+  if (lines.length === 0) {
+    ctx.fillStyle = "#9aa4b2";
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("当前没有 GIS 数据源底图，仍可直接点选（坐标为地图区域坐标）", cssW / 2, h / dpr / 2 - 6);
+  }
+  // 目标点
+  if (pick) {
+    const [x, y] = px(pick.lon, pick.lat);
+    const dx = x / dpr, dy = y / dpr;
+    ctx.strokeStyle = "#cf1322";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(dx, dy, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(dx - 12, dy); ctx.lineTo(dx + 12, dy);
+    ctx.moveTo(dx, dy - 12); ctx.lineTo(dx, dy + 12);
+    ctx.stroke();
+  }
+  return { projector: px };
 }
 
 type Lang = "zh-CN" | "en-US";
@@ -137,7 +253,11 @@ export default function DevicesPage() {
   const [routeSourceName, setRouteSourceName] = useState("");
   const [pointsText, setPointsText] = useState("");
   const [stationDialog, setStationDialog] = useState<StationItem | "new" | null>(null);
-  const [stationForm, setStationForm] = useState({ name: "", lon: "", lat: "", purpose: "charging", description: "" });
+  const [stationForm, setStationForm] = useState({ name: "", purpose: "charging", description: "" });
+  // 地图点选基站（不手输经纬度）
+  const stationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [stationLines, setStationLines] = useState<number[][][]>([]);
+  const [stationPick, setStationPick] = useState<{ lon: number; lat: number } | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -292,9 +412,19 @@ export default function DevicesPage() {
 
   // ---------- 基站 ----------
   const saveStation = async (): Promise<void> => {
+    if (!stationPick) {
+      setNotice({ kind: "error", text: t("请先在地图上点选基站位置", "Click the map to place the station first") });
+      return;
+    }
     setBusy(true);
     try {
-      const payload = { name: stationForm.name.trim(), lon: Number(stationForm.lon), lat: Number(stationForm.lat), purpose: stationForm.purpose, description: stationForm.description.trim() || null };
+      const payload = {
+        name: stationForm.name.trim(),
+        lon: Number(stationPick.lon.toFixed(6)),
+        lat: Number(stationPick.lat.toFixed(6)),
+        purpose: stationForm.purpose,
+        description: stationForm.description.trim() || null,
+      };
       if (stationDialog === "new") await jfetch("/base-stations", { method: "POST", body: JSON.stringify(payload) });
       else if (stationDialog) await jfetch(`/base-stations/${stationDialog.id}`, { method: "PATCH", body: JSON.stringify(payload) });
       setStationDialog(null);
@@ -304,6 +434,69 @@ export default function DevicesPage() {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 打开基站对话框：同步当前 GIS 数据源作为点选底图 */
+  const openStationDialog = async (station: StationItem | "new"): Promise<void> => {
+    setStationDialog(station);
+    setStationPick(station === "new" ? null : { lon: station.lon, lat: station.lat });
+    setStationForm({
+      name: station === "new" ? t(`基站 ${(stations?.length ?? 0) + 1}`, `Station ${(stations?.length ?? 0) + 1}`) : station.name,
+      purpose: station === "new" ? "charging" : station.purpose,
+      description: station === "new" ? "" : station.description ?? "",
+    });
+    const source = readActiveGisSource();
+    if (!source) {
+      setStationLines([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/data-files/${source.id}/content`, { credentials: "include" });
+      if (res.ok) setStationLines(extractGeoLines((await res.json()) as unknown));
+    } catch {
+      /* 底图加载失败不阻塞点选 */
+    }
+  };
+
+  // 对话框打开/选点变化时重绘点选底图
+  useEffect(() => {
+    const cv = stationCanvasRef.current;
+    if (!cv || stationDialog === null) return;
+    const frame = requestAnimationFrame(() => {
+      paintStationPicker(cv, stationLines, stationPick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [stationDialog, stationLines, stationPick]);
+
+  const onStationCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>): void => {
+    const cv = stationCanvasRef.current;
+    if (!cv) return;
+    const rect = cv.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const x = (event.clientX - rect.left) * dpr;
+    const y = (event.clientY - rect.top) * dpr;
+    // 按与绘制一致的 bounds 反解坐标
+    let lo = Infinity, hi = -Infinity, laLo = Infinity, laHi = -Infinity;
+    for (const line of stationLines) {
+      for (const [lon, lat] of line) {
+        lo = Math.min(lo, lon); hi = Math.max(hi, lon);
+        laLo = Math.min(laLo, lat); laHi = Math.max(laHi, lat);
+      }
+    }
+    if (!Number.isFinite(lo)) {
+      lo = 126.5; hi = 127.5; laLo = 46.3; laHi = 46.9;
+    }
+    const pad = 30;
+    const cos = Math.cos(((laLo + laHi) / 2) * Math.PI / 180);
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    const scale = Math.min(
+      (w - pad * 2) / Math.max((hi - lo) * 111320 * cos, 1),
+      (h - pad * 2) / Math.max((laHi - laLo) * 110540, 1),
+    );
+    const lon = lo + (x - pad) / (111320 * cos * scale);
+    const lat = laHi - (y - pad) / (110540 * scale);
+    setStationPick({ lon, lat });
   };
 
   const removeStation = async (station: StationItem): Promise<void> => {
@@ -362,8 +555,8 @@ export default function DevicesPage() {
               <Button size="small" variant="outlined" startIcon={<RefreshRounded sx={{ fontSize: 15 }} />} onClick={() => void refresh()} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
                 {zh ? "刷新" : "Refresh"}
               </Button>
-              <Button size="small" variant="outlined" startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />} onClick={() => { setStationDialog("new"); setStationForm({ name: "", lon: "", lat: "", purpose: "charging", description: "" }); }} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
-                {zh ? "新增基站" : "Add station"}
+              <Button size="small" variant="outlined" startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />} onClick={() => void openStationDialog("new")} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
+                {zh ? "新建基站" : "Add station"}
               </Button>
             </Stack>
           </Stack>
@@ -462,13 +655,13 @@ export default function DevicesPage() {
 
               <Stack direction="row" spacing={1.5} sx={{ alignItems: "baseline", mb: 1.5 }}>
                 <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{zh ? "基站" : "Base stations"}</Typography>
-                <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>{zh ? "用于路径推算与指令下发，首页地图可点选标注" : "For routing & commands; click-to-place on Home map"}</Typography>
+                <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>{zh ? "用于路径推算与指令下发：点「新建基站」在地图上点选即可" : "For routing & commands: “Add station” and pick a point on the map"}</Typography>
               </Stack>
               <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden" }}>
                 {stations.length === 0 ? (
                   <Box sx={{ p: 5, textAlign: "center" }}>
                     <Typography sx={{ fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                      {zh ? "尚未规划基站：点击右上角「新增基站」填写经纬度" : "No base stations yet. Click “Add station” and enter lon/lat."}
+                      {zh ? "尚未规划基站：点击右上角「新建基站」，在地图上点选位置即可放置" : "No base stations yet. Click “Add station” and pick a location on the map."}
                     </Typography>
                   </Box>
                 ) : (
@@ -490,7 +683,7 @@ export default function DevicesPage() {
                               {station.description ? ` · ${station.description}` : ""}
                             </Typography>
                           </Box>
-                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setStationDialog(station); setStationForm({ name: station.name, lon: String(station.lon), lat: String(station.lat), purpose: station.purpose, description: station.description ?? "" }); }} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
+                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => void openStationDialog(station)} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
                           <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeStation(station)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
                         </Stack>
                       </Box>
@@ -593,16 +786,52 @@ export default function DevicesPage() {
             </DialogActions>
           </Dialog>
 
-          {/* 基站 */}
-          <Dialog open={stationDialog !== null} onClose={() => setStationDialog(null)} maxWidth="xs" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{stationDialog === "new" ? t("新增基站", "Add station") : t("编辑基站", "Edit station")}</DialogTitle>
+          {/* 基站（地图点选） */}
+          <Dialog open={stationDialog !== null} onClose={() => setStationDialog(null)} maxWidth="sm" fullWidth>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
+              {stationDialog === "new" ? t("新建基站 · 地图点选", "Add station · pick on map") : t("编辑基站 · 地图点选", "Edit station · pick on map")}
+            </DialogTitle>
             <DialogContent>
-              <Stack spacing={2} sx={{ mt: 1 }}>
+              <Stack spacing={1.5}>
+                <Box
+                  sx={{
+                    position: "relative",
+                    height: 300,
+                    borderRadius: "12px",
+                    overflow: "hidden",
+                    border: "1px solid var(--pm-color-border)",
+                  }}
+                >
+                  <canvas
+                    ref={stationCanvasRef}
+                    style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair" }}
+                    onClick={onStationCanvasClick}
+                  />
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      left: 10,
+                      bottom: 10,
+                      px: 1,
+                      py: 0.25,
+                      borderRadius: "8px",
+                      backgroundColor: "rgba(255,255,255,0.92)",
+                      fontSize: 11,
+                      color: "var(--pm-color-text-hint)",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    {zh ? "点击地图放置/调整基站位置（无需手输经纬度）" : "Click the map to place or move the station"}
+                  </Box>
+                </Box>
+                <Alert severity={stationPick ? "success" : "warning"} sx={{ borderRadius: "10px" }}>
+                  {stationPick
+                    ? `${zh ? "已选位置" : "Position"}: ${stationPick.lon.toFixed(6)}, ${stationPick.lat.toFixed(6)}`
+                    : zh
+                      ? "尚未选点：请在上方地图中点击基站所在位置"
+                      : "No point yet: click the map to choose the station location"}
+                </Alert>
                 <TextField size="small" label={t("名称", "Name")} value={stationForm.name} onChange={(e) => setStationForm({ ...stationForm, name: e.target.value })} />
-                <Stack direction="row" spacing={1.5}>
-                  <TextField size="small" label={t("经度", "Lon")} value={stationForm.lon} onChange={(e) => setStationForm({ ...stationForm, lon: e.target.value })} />
-                  <TextField size="small" label={t("纬度", "Lat")} value={stationForm.lat} onChange={(e) => setStationForm({ ...stationForm, lat: e.target.value })} />
-                </Stack>
                 <Select size="small" value={stationForm.purpose} onChange={(e) => setStationForm({ ...stationForm, purpose: e.target.value })}>
                   <MenuItem value="charging">{t("充电站", "Charging")}</MenuItem>
                   <MenuItem value="relay">{t("中继站", "Relay")}</MenuItem>
@@ -613,7 +842,7 @@ export default function DevicesPage() {
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
               <Button size="small" onClick={() => setStationDialog(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy || !stationForm.name.trim()} onClick={() => void saveStation()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存", "Save")}</Button>
+              <Button size="small" variant="contained" disableElevation disabled={busy || !stationForm.name.trim() || !stationPick} onClick={() => void saveStation()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存", "Save")}</Button>
             </DialogActions>
           </Dialog>
 
