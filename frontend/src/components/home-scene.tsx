@@ -15,6 +15,8 @@ import {
   fetchGisSourceContent,
   listenGisActiveChange,
 } from "@/lib/gis-source";
+import { io } from "socket.io-client";
+import { API_BASE } from "@/lib/api";
 import {
   locateRegion,
   loadLocalRegion,
@@ -159,6 +161,15 @@ export function HomeScene() {
   const activeFileIdRef = useRef<number | null>(null);
   const hoverSegRef = useRef<GisLineSegment | null>(null);
   const hoverPosRef = useRef<{ x: number; y: number } | null>(null);
+  // 首页叠加：基站与设备实时位置（Socket 驱动）
+  const stationsRef = useRef<
+    Array<{ id: number; name: string; lon: number; lat: number; purpose: string }>
+  >([]);
+  const deviceMetaRef = useRef<
+    Array<{ id: number; name: string; type: string; status: string }>
+  >([]);
+  const telemetryRef = useRef<Map<number, { lon: number; lat: number; ts: number }>>(new Map());
+  const redrawRef = useRef<(() => void) | null>(null);
   const [pipeStats, setPipeStats] = useState<PipeStats[]>([]);
   const [statusMsg, setStatusMsg] = useState<SceneMsg | null>(null);
   const [baseMsg, setBaseMsg] = useState<SceneMsg>({ key: "mapBaseLoading" });
@@ -205,6 +216,83 @@ export function HomeScene() {
     }
     return len;
   }
+
+  // 首页实时叠加：基站 + 已注册设备位置（Socket 推送 + 周期兜底刷新）
+  useEffect(() => {
+    let disposed = false;
+    const redraw = (): void => redrawRef.current?.();
+    const load = async (): Promise<void> => {
+      try {
+        const res = await fetch(`${API_BASE}/base-stations`);
+        if (res.ok) {
+          const body = (await res.json()) as Array<{
+            id: number;
+            name: string;
+            lon: number;
+            lat: number;
+            purpose: string;
+          }>;
+          stationsRef.current = Array.isArray(body) ? body : [];
+        }
+      } catch {
+        /* 基站加载失败不影响地图 */
+      }
+      try {
+        const devRes = await fetch(`${API_BASE}/devices`);
+        if (devRes.ok) {
+          const body = (await devRes.json()) as Array<{
+            id: number;
+            name: string;
+            type: string;
+            status: string;
+            state: string;
+          }>;
+          deviceMetaRef.current = (Array.isArray(body) ? body : [])
+            .filter((d) => d.state === "approved")
+            .map((d) => ({ id: d.id, name: d.name, type: d.type, status: d.status }));
+        }
+      } catch {
+        /* ignore */
+      }
+      try {
+        const tRes = await fetch(`${API_BASE}/devices/telemetry/latest`);
+        if (tRes.ok) {
+          const body = (await tRes.json()) as { devices?: Array<{ deviceId: number; lon: number; lat: number; ts?: number }> };
+          const map = telemetryRef.current;
+          for (const item of body.devices ?? []) {
+            map.set(item.deviceId, { lon: item.lon, lat: item.lat, ts: item.ts ?? Date.now() });
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!disposed) redraw();
+    };
+    void load();
+
+    let sock: ReturnType<typeof io> | null = null;
+    try {
+      const wsUrl = API_BASE.replace(/\/api$/, "");
+      sock = io(wsUrl, { path: "/socket.io", transports: ["websocket", "polling"], reconnection: true });
+      sock.on("pm:telemetry", (p: { deviceId: number; lon: number; lat: number; ts?: number; status?: string }) => {
+        telemetryRef.current.set(p.deviceId, { lon: p.lon, lat: p.lat, ts: p.ts ?? Date.now() });
+        const dev = deviceMetaRef.current.find((x) => x.id === p.deviceId);
+        if (dev && p.status) dev.status = p.status;
+        redraw();
+      });
+      sock.on("pm:stations-changed", () => void load());
+      sock.on("pm:devices-changed", () => void load());
+      sock.on("pm:hello", () => void load());
+    } catch {
+      /* socket 不可用时保留 REST 轮询兜底 */
+    }
+    const timer = window.setInterval(() => void load(), 20000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      sock?.close();
+    };
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -408,6 +496,61 @@ export function HomeScene() {
         ctx.fillText(feature.name, p.sx, p.sy);
       }
 
+      // ---- 首页叠加：基站（绿点）----
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      for (const st of stationsRef.current) {
+        const m0 = lonLatToMeters(st.lon, st.lat);
+        const sp = toScreen(m0.x, m0.y);
+        if (sp.sx < -40 || sp.sx > size.w + 40 || sp.sy < -40 || sp.sy > size.h + 40) {
+          continue;
+        }
+        ctx.fillStyle = "#2e9e5b";
+        ctx.beginPath();
+        ctx.arc(sp.sx, sp.sy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (view.scale > 0.00002) {
+          ctx.fillStyle = "#0b6a45";
+          ctx.font = "600 11px system-ui, sans-serif";
+          ctx.fillText(st.name, sp.sx + 9, sp.sy);
+        }
+      }
+      // ---- 设备实时位置（管道机器人=蓝圆，无人机=紫方块）----
+      ctx.font = "600 11px system-ui, sans-serif";
+      for (const dev of deviceMetaRef.current) {
+        const tel = telemetryRef.current.get(dev.id);
+        if (!tel) {
+          continue;
+        }
+        const m0 = lonLatToMeters(tel.lon, tel.lat);
+        const sp = toScreen(m0.x, m0.y);
+        if (sp.sx < -40 || sp.sx > size.w + 40 || sp.sy < -40 || sp.sy > size.h + 40) {
+          continue;
+        }
+        const color = dev.type === "drone" ? "#7a5af8" : "#1664ff";
+        ctx.fillStyle = color;
+        if (dev.type === "drone") {
+          ctx.fillRect(sp.sx - 5.5, sp.sy - 5.5, 11, 11);
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(sp.sx - 5.5, sp.sy - 5.5, 11, 11);
+        } else {
+          ctx.beginPath();
+          ctx.arc(sp.sx, sp.sy, 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        if (view.scale > 0.00002) {
+          ctx.fillStyle = color;
+          ctx.fillText(dev.name, sp.sx + 9, sp.sy);
+        }
+      }
+
       // keep DOM scale bar (below legend) in sync
       const mPerPx = 1 / view.scale;
       const target = 110 * mPerPx;
@@ -429,6 +572,7 @@ export function HomeScene() {
       if (scaleLabelRef.current) {
         scaleLabelRef.current.textContent = label;
       }
+      redrawRef.current = draw;
     };
 
     const targetViewForBounds = (

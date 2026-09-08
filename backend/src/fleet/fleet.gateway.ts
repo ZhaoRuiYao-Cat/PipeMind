@@ -27,6 +27,16 @@ export class FleetGateway implements OnGatewayConnection {
     this.server.emit("pm:telemetry", point);
   }
 
+  /** 基站列表发生变化（新增/编辑/删除）→ 前端首页重新拉取 */
+  broadcastStationsChanged(): void {
+    this.server.emit("pm:stations-changed");
+  }
+
+  /** 设备入网状态变化（注册/审批/注销/删除）→ 前端首页重新拉取设备 */
+  broadcastDevicesChanged(): void {
+    this.server.emit("pm:devices-changed");
+  }
+
   /** 外部设备/检测终端通过 Socket 推送真实数据 */
   @SubscribeMessage("device:telemetry")
   onDeviceTelemetry(
