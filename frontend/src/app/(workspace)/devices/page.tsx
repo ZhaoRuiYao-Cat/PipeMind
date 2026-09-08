@@ -1,6 +1,6 @@
 "use client";
 
-// 设备与基站：管道机器人 / 无人机 CRUD、基于当前 GIS 数据源规划巡航路线、基站管理
+// 设备与基站：设备发起注册 → 管理端审批（同意签发一次性密钥/拒绝），巡航路线、基站管理
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ThemeProvider } from "@mui/material/styles";
 import Box from "@mui/material/Box";
@@ -23,11 +23,15 @@ import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import AddRounded from "@mui/icons-material/AddRounded";
 import CellTowerRounded from "@mui/icons-material/CellTowerRounded";
+import CheckRounded from "@mui/icons-material/CheckRounded";
+import CloseRounded from "@mui/icons-material/CloseRounded";
+import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import EditOutlined from "@mui/icons-material/EditOutlined";
 import FlightTakeoffRounded from "@mui/icons-material/FlightTakeoffRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import RouteRounded from "@mui/icons-material/RouteRounded";
+import SensorDoorRounded from "@mui/icons-material/SensorDoorRounded";
 import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import { useI18n } from "@/lib/i18n";
 import { pmTheme } from "@/lib/theme";
@@ -39,7 +43,10 @@ interface DeviceItem {
   name: string;
   type: "crawler" | "drone";
   status: string;
+  state: "pending" | "approved" | "rejected" | "revoked";
   description: string | null;
+  registeredAt: string | null;
+  createdAt: string;
 }
 interface StationItem {
   id: number;
@@ -54,16 +61,24 @@ type Lang = "zh-CN" | "en-US";
 const T: Record<string, Record<Lang, string>> = {
   title: { "zh-CN": "设备与基站", "en-US": "Devices & Stations" },
   subtitle: {
-    "zh-CN": "管理管道机器人与无人机，基于当前 GIS 数据源规划巡航路线，并在地图上规划基站用于路径推算与指令下发",
-    "en-US": "Manage crawlers & drones, plan cruise routes from the active GIS source, and place base stations for routing and commands",
+    "zh-CN": "设备端发起注册申请，由本系统审批同意后签发一次性密钥接入；并为已注册设备规划基于 GIS 数据源的巡航路线，管理基站。",
+    "en-US": "Devices apply to join; the system approves them and issues a one-time secret. Plan cruise routes from the GIS source and manage base stations.",
   },
-  devicesSection: { "zh-CN": "设备", "en-US": "Devices" },
-  stationsSection: { "zh-CN": "基站", "en-US": "Base stations" },
 };
 
 async function jfetch(path: string, init?: RequestInit): Promise<unknown> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include", headers: { "Content-Type": "application/json" }, ...init });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text();
+    let message = `HTTP ${res.status}`;
+    try {
+      const parsed = JSON.parse(body) as { message?: string };
+      if (parsed.message) message = parsed.message;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
   return res.json();
 }
 
@@ -96,6 +111,13 @@ function samplePoints(raw: unknown, maxPoints = 120): Array<{ lon: number; lat: 
   return sampled;
 }
 
+const STATE_CHIP: Record<string, { label: (zh: boolean) => string; color: string; bg: string }> = {
+  pending: { label: (zh) => (zh ? "待审批" : "Pending"), color: "#b25e09", bg: "rgba(178,94,9,0.1)" },
+  approved: { label: (zh) => (zh ? "已注册" : "Approved"), color: "#1664ff", bg: "var(--pm-color-primary-soft)" },
+  rejected: { label: (zh) => (zh ? "已拒绝" : "Rejected"), color: "#cf1322", bg: "rgba(207,19,34,0.08)" },
+  revoked: { label: (zh) => (zh ? "已注销" : "Revoked"), color: "#86909c", bg: "rgba(134,144,156,0.12)" },
+};
+
 export default function DevicesPage() {
   const { lang } = useI18n();
   const zh = lang === "zh-CN";
@@ -105,8 +127,18 @@ export default function DevicesPage() {
   const [stations, setStations] = useState<StationItem[] | null>(null);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState<DeviceItem | null | "new">(null);
-  const [form, setForm] = useState({ name: "", type: "crawler", status: "offline", description: "" });
+
+  // 注册申请
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const [registerForm, setRegisterForm] = useState({ name: "", type: "crawler", description: "" });
+
+  // 审批密钥（一次性展示）
+  const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
+  const [copied, setCopied] = useState<"secret" | "curl" | null>(null);
+
+  // 编辑（仅名称/备注）、路线、基站
+  const [editing, setEditing] = useState<DeviceItem | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", description: "" });
   const [routeFor, setRouteFor] = useState<DeviceItem | null>(null);
   const [routeSourceName, setRouteSourceName] = useState("");
   const [pointsText, setPointsText] = useState("");
@@ -133,19 +165,27 @@ export default function DevicesPage() {
     const list = devices ?? [];
     return {
       total: list.length,
-      crawler: list.filter((d) => d.type === "crawler").length,
-      drone: list.filter((d) => d.type === "drone").length,
-      online: list.filter((d) => d.status === "online").length,
+      crawler: list.filter((d) => d.type === "crawler" && d.state !== "revoked").length,
+      drone: list.filter((d) => d.type === "drone" && d.state !== "revoked").length,
+      pending: list.filter((d) => d.state === "pending").length,
+      approved: list.filter((d) => d.state === "approved").length,
     };
   }, [devices]);
 
-  const saveDevice = async (): Promise<void> => {
+  const orderedDevices = useMemo(() => {
+    const order: Record<string, number> = { pending: 0, approved: 1, rejected: 2, revoked: 3 };
+    const list = devices ?? [];
+    return [...list].sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.createdAt.localeCompare(b.createdAt));
+  }, [devices]);
+
+  // ---------- 设备入网 ----------
+  const submitRegister = async (): Promise<void> => {
     setBusy(true);
     try {
-      if (editing === "new") await jfetch("/devices", { method: "POST", body: JSON.stringify(form) });
-      else if (editing) await jfetch(`/devices/${editing.id}`, { method: "PATCH", body: JSON.stringify(form) });
-      setEditing(null);
-      setNotice({ kind: "success", text: t("设备已保存", "Device saved") });
+      await jfetch("/devices/register", { method: "POST", body: JSON.stringify(registerForm) });
+      setRegisterOpen(false);
+      setRegisterForm({ name: "", type: "crawler", description: "" });
+      setNotice({ kind: "success", text: t("注册申请已提交，等待管理端审批", "Registration submitted; awaiting approval") });
       await refresh();
     } catch (err) {
       setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
@@ -154,8 +194,32 @@ export default function DevicesPage() {
     }
   };
 
+  const approveDevice = async (device: DeviceItem): Promise<void> => {
+    if (!globalThis.confirm(t(`同意“${device.name}”入网？批准后将签发一次性设备密钥。`, `Approve "${device.name}"? A one-time secret will be issued.`))) return;
+    setBusy(true);
+    try {
+      const resp = (await jfetch(`/devices/${device.id}/approve`, { method: "POST" })) as { device: DeviceItem; secret: string };
+      setSecretDialog({ name: resp.device.name, id: resp.device.id, secret: resp.secret });
+      await refresh();
+    } catch (err) {
+      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rejectDevice = async (device: DeviceItem): Promise<void> => {
+    if (!globalThis.confirm(t(`拒绝“${device.name}”的注册申请？`, `Reject "${device.name}" registration?`))) return;
+    try {
+      await jfetch(`/devices/${device.id}/reject`, { method: "POST" });
+      await refresh();
+    } catch (err) {
+      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
   const removeDevice = async (device: DeviceItem): Promise<void> => {
-    if (!globalThis.confirm(t(`删除设备“${device.name}”？`, `Delete device "${device.name}"?`))) return;
+    if (!globalThis.confirm(t(`删除“${device.name}”？`, `Remove "${device.name}"?`))) return;
     try {
       await jfetch(`/devices/${device.id}`, { method: "DELETE" });
       await refresh();
@@ -164,6 +228,21 @@ export default function DevicesPage() {
     }
   };
 
+  const saveEdit = async (): Promise<void> => {
+    if (!editing) return;
+    setBusy(true);
+    try {
+      await jfetch(`/devices/${editing.id}`, { method: "PATCH", body: JSON.stringify(editForm) });
+      setEditing(null);
+      await refresh();
+    } catch (err) {
+      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ---------- 巡航路线 ----------
   const openRoute = async (device: DeviceItem): Promise<void> => {
     setRouteFor(device);
     setRouteSourceName(activeSource?.name ?? "");
@@ -232,20 +311,14 @@ export default function DevicesPage() {
     }
   };
 
+  // ---------- 基站 ----------
   const saveStation = async (): Promise<void> => {
     setBusy(true);
     try {
-      const payload = {
-        name: stationForm.name.trim(),
-        lon: Number(stationForm.lon),
-        lat: Number(stationForm.lat),
-        purpose: stationForm.purpose,
-        description: stationForm.description.trim() || null,
-      };
+      const payload = { name: stationForm.name.trim(), lon: Number(stationForm.lon), lat: Number(stationForm.lat), purpose: stationForm.purpose, description: stationForm.description.trim() || null };
       if (stationDialog === "new") await jfetch("/base-stations", { method: "POST", body: JSON.stringify(payload) });
       else if (stationDialog) await jfetch(`/base-stations/${stationDialog.id}`, { method: "PATCH", body: JSON.stringify(payload) });
       setStationDialog(null);
-      setNotice({ kind: "success", text: t("基站已保存", "Station saved") });
       await refresh();
     } catch (err) {
       setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
@@ -264,7 +337,20 @@ export default function DevicesPage() {
     }
   };
 
-  const statusMeta = (status: string): { color: string; label: string } => {
+  const copyText = async (text: string, key: "secret" | "curl"): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      window.setTimeout(() => setCopied(null), 1400);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const secretCurl = (id: number, secret: string): string =>
+    `curl -X POST 'http://localhost:3001/api/devices/${id}/telemetry' \\\n  -H 'Content-Type: application/json' \\\n  -H 'x-device-key: ${secret}' \\\n  -d '{"lon":126.9,"lat":46.61,"speed":1.2}'`;
+
+  const runtimeStatus = (status: string): { color: string; label: string } => {
     const map: Record<string, { color: string; label: string }> = {
       online: { color: "#2e9e5b", label: zh ? "在线" : "Online" },
       busy: { color: "#b25e09", label: zh ? "工作中" : "Busy" },
@@ -274,7 +360,12 @@ export default function DevicesPage() {
     return map[status] ?? map.offline;
   };
 
-  const ghostIcon = (color = "var(--pm-color-text-secondary)") => ({
+  const pillBtn = {
+    borderRadius: "999px",
+    textTransform: "none" as const,
+    fontSize: 12,
+  };
+  const ghost = (color = "var(--pm-color-text-secondary)") => ({
     color,
     "&:hover": { backgroundColor: "var(--pm-color-primary-soft)", color: "#1664ff" },
   });
@@ -285,41 +376,18 @@ export default function DevicesPage() {
         <Box sx={{ width: "100%", maxWidth: 960, mx: "auto" }}>
           <Stack direction="row" spacing={2} sx={{ alignItems: "flex-start", mb: 4 }}>
             <Box sx={{ flex: 1 }}>
-              <Typography sx={{ fontSize: 22, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>
-                {T.title[lang]}
-              </Typography>
-              <Typography sx={{ mt: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                {T.subtitle[lang]}
-              </Typography>
+              <Typography sx={{ fontSize: 22, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>{T.title[lang]}</Typography>
+              <Typography sx={{ mt: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>{T.subtitle[lang]}</Typography>
             </Box>
             <Stack direction="row" spacing={1}>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<RefreshRounded sx={{ fontSize: 15 }} />}
-                onClick={() => void refresh()}
-                sx={{ borderRadius: "999px", textTransform: "none", fontSize: 12, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}
-              >
+              <Button size="small" variant="outlined" startIcon={<RefreshRounded sx={{ fontSize: 15 }} />} onClick={() => void refresh()} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
                 {zh ? "刷新" : "Refresh"}
               </Button>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />}
-                onClick={() => { setStationDialog("new"); setStationForm({ name: "", lon: "", lat: "", purpose: "charging", description: "" }); }}
-                sx={{ borderRadius: "999px", textTransform: "none", fontSize: 12, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}
-              >
+              <Button size="small" variant="outlined" startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />} onClick={() => { setStationDialog("new"); setStationForm({ name: "", lon: "", lat: "", purpose: "charging", description: "" }); }} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
                 {zh ? "新增基站" : "Add station"}
               </Button>
-              <Button
-                size="small"
-                variant="contained"
-                disableElevation
-                startIcon={<AddRounded sx={{ fontSize: 15 }} />}
-                onClick={() => { setEditing("new"); setForm({ name: "", type: "crawler", status: "offline", description: "" }); }}
-                sx={{ borderRadius: "999px", textTransform: "none", fontSize: 12, color: "var(--pm-color-primary-contrast, #fff)", backgroundColor: "#1664ff", "&:hover": { backgroundColor: "#0f54d6" } }}
-              >
-                {zh ? "新增设备" : "Add device"}
+              <Button size="small" variant="contained" disableElevation startIcon={<SensorDoorRounded sx={{ fontSize: 16 }} />} onClick={() => { setRegisterOpen(true); setRegisterForm({ name: "", type: "crawler", description: "" }); }} sx={{ ...pillBtn, color: "var(--pm-color-primary-contrast, #fff)", backgroundColor: "#1664ff", "&:hover": { backgroundColor: "#0f54d6" } }}>
+                {zh ? "注册设备" : "Register device"}
               </Button>
             </Stack>
           </Stack>
@@ -330,90 +398,95 @@ export default function DevicesPage() {
             </Stack>
           ) : (
             <>
-              {/* 概览统计 */}
               <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", px: { xs: 2.5, sm: 4 }, py: { xs: 2.5, sm: 3 }, mb: 4 }}>
                 <Stack direction="row" sx={{ alignItems: "stretch" }}>
                   <StatCell label={zh ? "设备总数" : "Total"} value={String(counts.total)} />
                   <StatCell label={zh ? "管道机器人" : "Crawlers"} value={String(counts.crawler)} />
                   <StatCell label={zh ? "无人机" : "Drones"} value={String(counts.drone)} />
-                  <StatCell label={zh ? "在线" : "Online"} value={String(counts.online)} last />
+                  <StatCell label={zh ? "已注册" : "Approved"} value={String(counts.approved)} last={false} />
+                  <StatCell label={zh ? "待审批" : "Pending"} value={String(counts.pending)} last />
                 </Stack>
               </Paper>
 
-              {/* 设备列表 */}
               <Stack direction="row" spacing={1.5} sx={{ alignItems: "baseline", mb: 1.5 }}>
                 <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>
-                  {T.devicesSection[lang]}
+                  {zh ? "设备" : "Devices"}
                 </Typography>
                 <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>
-                  {zh ? "点击右侧图标规划巡航路线 / 编辑 / 删除" : "Route / edit / delete via right-side icons"}
+                  {zh ? "待审批设备请点「同意」并配置一次性密钥" : "Approve pending devices to issue their one-time secret"}
                 </Typography>
               </Stack>
+
               <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden", mb: 4 }}>
-                {(devices.length === 0 ? [] : devices).map((device, index) => {
-                  const meta = statusMeta(device.status);
-                  return (
-                    <Box key={device.id}>
-                      {index > 0 && <Divider sx={{ mx: 3, borderColor: "var(--pm-color-divider)" }} />}
-                      <Box sx={{ px: { xs: 2.5, sm: 3 }, py: 2 }}>
-                        <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
-                          <Box
-                            sx={{
-                              width: 38,
-                              height: 38,
-                              flexShrink: 0,
-                              borderRadius: "10px",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              color: "#1664ff",
-                              backgroundColor: "var(--pm-color-primary-soft)",
-                            }}
-                          >
-                            {device.type === "drone" ? <FlightTakeoffRounded sx={{ fontSize: 20 }} /> : <SmartToyRounded sx={{ fontSize: 20 }} />}
-                          </Box>
-                          <Box sx={{ flex: 1, minWidth: 0 }}>
-                            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                              <Typography sx={{ fontSize: 15, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{device.name}</Typography>
-                              <Box sx={{ width: 7, height: 7, borderRadius: "50%", backgroundColor: meta.color }} />
-                              <Typography sx={{ fontSize: 11.5, color: meta.color }}>{meta.label}</Typography>
-                            </Stack>
-                            <Typography sx={{ mt: 0.25, fontSize: 12, color: "var(--pm-color-text-hint)" }}>
-                              {device.type === "crawler" ? t("管道机器人", "Crawler") : t("无人机", "Drone")}
-                              {device.description ? ` · ${device.description}` : ""}
-                            </Typography>
-                          </Box>
-                          <IconButton size="small" title={t("规划巡航路线", "Plan cruise route")} onClick={() => void openRoute(device)} sx={ghostIcon("#1664ff")}>
-                            <RouteRounded sx={{ fontSize: 19 }} />
-                          </IconButton>
-                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setEditing(device); setForm({ name: device.name, type: device.type, status: device.status, description: device.description ?? "" }); }} sx={ghostIcon()}>
-                            <EditOutlined sx={{ fontSize: 18 }} />
-                          </IconButton>
-                          <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeDevice(device)} sx={ghostIcon()}>
-                            <DeleteOutlineRounded sx={{ fontSize: 18 }} />
-                          </IconButton>
-                        </Stack>
-                      </Box>
-                    </Box>
-                  );
-                })}
-                {devices.length === 0 && (
+                {orderedDevices.length === 0 ? (
                   <Box sx={{ p: 5, textAlign: "center" }}>
                     <Typography sx={{ fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                      {zh ? "暂无设备，点击右上角「新增设备」添加管道机器人或无人机" : "No devices yet. Click “Add device” to create a crawler or drone."}
+                      {zh ? "暂无设备。请设备端调用“注册设备”申请入网，批准后即可接入。" : "No devices yet. Have devices register and approve them here."}
                     </Typography>
                   </Box>
+                ) : (
+                  orderedDevices.map((device, index) => {
+                    const stateChip = STATE_CHIP[device.state] ?? STATE_CHIP.pending;
+                    const runtime = device.state === "approved" ? runtimeStatus(device.status) : null;
+                    return (
+                      <Box key={device.id}>
+                        {index > 0 && <Divider sx={{ mx: 3, borderColor: "var(--pm-color-divider)" }} />}
+                        <Box sx={{ px: { xs: 2.5, sm: 3 }, py: 2 }}>
+                          <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+                            <Box sx={{ width: 38, height: 38, flexShrink: 0, borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }}>
+                              {device.type === "drone" ? <FlightTakeoffRounded sx={{ fontSize: 20 }} /> : <SmartToyRounded sx={{ fontSize: 20 }} />}
+                            </Box>
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                              <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                                <Typography sx={{ fontSize: 15, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{device.name}</Typography>
+                                <Chip size="small" label={stateChip.label(zh)} sx={{ height: 20, fontSize: 10.5, color: stateChip.color, backgroundColor: stateChip.bg }} />
+                                {runtime && (
+                                  <>
+                                    <Box sx={{ width: 7, height: 7, borderRadius: "50%", backgroundColor: runtime.color }} />
+                                    <Typography sx={{ fontSize: 11.5, color: runtime.color }}>{runtime.label}</Typography>
+                                  </>
+                                )}
+                              </Stack>
+                              <Typography sx={{ mt: 0.25, fontSize: 12, color: "var(--pm-color-text-hint)" }}>
+                                {device.type === "crawler" ? t("管道机器人", "Crawler") : t("无人机", "Drone")}
+                                {device.description ? ` · ${device.description}` : ""}
+                                {device.state === "approved" && device.registeredAt
+                                  ? ` · ${t("接入于", "Joined")} ${new Date(device.registeredAt).toLocaleString(zh ? "zh-CN" : "en-US", { hour12: false })}`
+                                  : device.state === "pending"
+                                    ? ` · ${t("等待审批…", "Awaiting approval…")}`
+                                    : ""}
+                              </Typography>
+                            </Box>
+
+                            {device.state === "pending" ? (
+                              <Stack direction="row" spacing={1}>
+                                <Button size="small" variant="contained" disableElevation startIcon={<CheckRounded sx={{ fontSize: 15 }} />} disabled={busy} onClick={() => void approveDevice(device)} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff", "&:hover": { backgroundColor: "#0f54d6" } }}>
+                                  {zh ? "同意" : "Approve"}
+                                </Button>
+                                <Button size="small" variant="outlined" startIcon={<CloseRounded sx={{ fontSize: 15 }} />} onClick={() => void rejectDevice(device)} sx={{ ...pillBtn, color: "#cf1322", borderColor: "rgba(207,19,34,0.35)", "&:hover": { borderColor: "#cf1322", backgroundColor: "rgba(207,19,34,0.04)" } }}>
+                                  {zh ? "拒绝" : "Reject"}
+                                </Button>
+                              </Stack>
+                            ) : device.state === "approved" ? (
+                              <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
+                                <IconButton size="small" title={t("规划巡航路线", "Plan cruise route")} onClick={() => void openRoute(device)} sx={ghost("#1664ff")}><RouteRounded sx={{ fontSize: 19 }} /></IconButton>
+                                <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setEditing(device); setEditForm({ name: device.name, description: device.description ?? "" }); }} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
+                                <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeDevice(device)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
+                              </Stack>
+                            ) : (
+                              <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeDevice(device)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
+                            )}
+                          </Stack>
+                        </Box>
+                      </Box>
+                    );
+                  })
                 )}
               </Paper>
 
-              {/* 基站列表 */}
               <Stack direction="row" spacing={1.5} sx={{ alignItems: "baseline", mb: 1.5 }}>
-                <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>
-                  {T.stationsSection[lang]}
-                </Typography>
-                <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>
-                  {zh ? "供路径推算与指令下发；首页地图可点选位置标注" : "For routing & commands; click-to-place coming on Home map"}
-                </Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{zh ? "基站" : "Base stations"}</Typography>
+                <Typography sx={{ fontSize: 12, color: "var(--pm-color-text-hint)" }}>{zh ? "用于路径推算与指令下发，首页地图可点选标注" : "For routing & commands; click-to-place on Home map"}</Typography>
               </Stack>
               <Paper elevation={0} variant="outlined" sx={{ borderRadius: "16px", borderColor: "var(--pm-color-border)", overflow: "hidden" }}>
                 {stations.length === 0 ? (
@@ -428,41 +501,21 @@ export default function DevicesPage() {
                       {index > 0 && <Divider sx={{ mx: 3, borderColor: "var(--pm-color-divider)" }} />}
                       <Box sx={{ px: { xs: 2.5, sm: 3 }, py: 1.75 }}>
                         <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
-                          <Box
-                            sx={{
-                              width: 38,
-                              height: 38,
-                              flexShrink: 0,
-                              borderRadius: "10px",
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              color: "#1664ff",
-                              backgroundColor: "var(--pm-color-primary-soft)",
-                            }}
-                          >
+                          <Box sx={{ width: 38, height: 38, flexShrink: 0, borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }}>
                             <CellTowerRounded sx={{ fontSize: 20 }} />
                           </Box>
                           <Box sx={{ flex: 1, minWidth: 0 }}>
                             <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
                               <Typography sx={{ fontSize: 15, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{station.name}</Typography>
-                              <Chip
-                                size="small"
-                                label={station.purpose === "charging" ? t("充电站", "Charging") : station.purpose === "relay" ? t("中继站", "Relay") : t("指挥站", "Command")}
-                                sx={{ height: 20, fontSize: 10.5, color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }}
-                              />
+                              <Chip size="small" label={station.purpose === "charging" ? t("充电站", "Charging") : station.purpose === "relay" ? t("中继站", "Relay") : t("指挥站", "Command")} sx={{ height: 20, fontSize: 10.5, color: "#1664ff", backgroundColor: "var(--pm-color-primary-soft)" }} />
                             </Stack>
                             <Typography sx={{ mt: 0.25, fontSize: 12, fontFamily: "Consolas, monospace", color: "var(--pm-color-text-hint)" }}>
                               {station.lon.toFixed(6)}, {station.lat.toFixed(6)}
                               {station.description ? ` · ${station.description}` : ""}
                             </Typography>
                           </Box>
-                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setStationDialog(station); setStationForm({ name: station.name, lon: String(station.lon), lat: String(station.lat), purpose: station.purpose, description: station.description ?? "" }); }} sx={ghostIcon()}>
-                            <EditOutlined sx={{ fontSize: 18 }} />
-                          </IconButton>
-                          <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeStation(station)} sx={ghostIcon()}>
-                            <DeleteOutlineRounded sx={{ fontSize: 18 }} />
-                          </IconButton>
+                          <IconButton size="small" title={t("编辑", "Edit")} onClick={() => { setStationDialog(station); setStationForm({ name: station.name, lon: String(station.lon), lat: String(station.lat), purpose: station.purpose, description: station.description ?? "" }); }} sx={ghost()}><EditOutlined sx={{ fontSize: 18 }} /></IconButton>
+                          <IconButton size="small" title={t("删除", "Delete")} onClick={() => void removeStation(station)} sx={ghost()}><DeleteOutlineRounded sx={{ fontSize: 18 }} /></IconButton>
                         </Stack>
                       </Box>
                     </Box>
@@ -472,44 +525,89 @@ export default function DevicesPage() {
             </>
           )}
 
-          {/* 设备新增/编辑 */}
-          <Dialog open={editing !== null} onClose={() => setEditing(null)} maxWidth="xs" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
-              {editing === "new" ? t("新增设备", "Add device") : t("编辑设备", "Edit device")}
-            </DialogTitle>
+          {/* 注册申请 */}
+          <Dialog open={registerOpen} onClose={() => setRegisterOpen(false)} maxWidth="xs" fullWidth>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{zh ? "注册设备" : "Register device"}</DialogTitle>
             <DialogContent>
-              <Stack spacing={2} sx={{ mt: 1 }}>
-                <TextField size="small" label={t("名称", "Name")} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-                <Select size="small" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              <Alert severity="info" sx={{ mb: 2, borderRadius: "12px" }}>
+                {zh
+                  ? "模拟设备端发起注册：提交后设备进入“待审批”，由管理端同意后签发一次性密钥，设备方可上报数据。"
+                  : "Device-initiated registration: after approval the device receives a one-time secret before it can report."}
+              </Alert>
+              <Stack spacing={2}>
+                <TextField size="small" label={t("设备名称", "Device name")} value={registerForm.name} onChange={(e) => setRegisterForm({ ...registerForm, name: e.target.value })} />
+                <Select size="small" value={registerForm.type} onChange={(e) => setRegisterForm({ ...registerForm, type: e.target.value })}>
                   <MenuItem value="crawler">{t("管道机器人", "Crawler")}</MenuItem>
                   <MenuItem value="drone">{t("无人机", "Drone")}</MenuItem>
                 </Select>
-                <Select size="small" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-                  <MenuItem value="offline">{t("离线", "Offline")}</MenuItem>
-                  <MenuItem value="online">{t("在线", "Online")}</MenuItem>
-                  <MenuItem value="busy">{t("工作中", "Busy")}</MenuItem>
-                  <MenuItem value="fault">{t("故障", "Fault")}</MenuItem>
-                </Select>
-                <TextField size="small" label={t("备注", "Note")} multiline minRows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+                <TextField size="small" label={t("备注", "Note")} multiline minRows={2} value={registerForm.description} onChange={(e) => setRegisterForm({ ...registerForm, description: e.target.value })} />
               </Stack>
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" onClick={() => setEditing(null)} sx={{ borderRadius: "999px", textTransform: "none" }}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy || !form.name.trim()} onClick={() => void saveDevice()} sx={{ borderRadius: "999px", textTransform: "none" }}>
-                {t("保存", "Save")}
+              <Button size="small" onClick={() => setRegisterOpen(false)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
+              <Button size="small" variant="contained" disableElevation disabled={busy || !registerForm.name.trim()} onClick={() => void submitRegister()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>
+                {t("提交注册申请", "Submit request")}
               </Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* 密钥发放（一次性） */}
+          <Dialog open={secretDialog !== null} onClose={() => setSecretDialog(null)} maxWidth="sm" fullWidth>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{zh ? "设备已注册" : "Device approved"}</DialogTitle>
+            <DialogContent>
+              {secretDialog && (
+                <Stack spacing={1.5}>
+                  <Alert severity="success" sx={{ borderRadius: "12px" }}>
+                    {zh
+                      ? `已同意「${secretDialog.name}」入网。设备密钥仅显示这一次，请立即配置到设备并妥善保存。`
+                      : `"${secretDialog.name}" approved. The secret is shown only once — configure it on the device now.`}
+                  </Alert>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                    <Typography sx={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: "var(--pm-color-text-secondary)" }}>{zh ? "设备密钥 x-device-key" : "Device secret"}</Typography>
+                    <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretDialog.secret, "secret")} sx={pillBtn}>
+                      {copied === "secret" ? t("已复制", "Copied") : t("复制", "Copy")}
+                    </Button>
+                  </Stack>
+                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#0f172a", color: "#9be8c6", fontSize: 12.5, lineHeight: 1.6, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace", userSelect: "all" }}>
+                    {secretDialog.secret}
+                  </Box>
+                  <Typography sx={{ fontSize: 12, fontWeight: 600, color: "var(--pm-color-text-hint)" }}>{zh ? "设备上报示例" : "Telemetry example"}</Typography>
+                  <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#f8f9fb", border: "1px solid var(--pm-color-border)", fontSize: 11.5, lineHeight: 1.6, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace" }}>
+                    {secretCurl(secretDialog.id, secretDialog.secret)}
+                  </Box>
+                  <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretCurl(secretDialog.id, secretDialog.secret), "curl")} sx={{ ...pillBtn, alignSelf: "flex-start" }}>
+                    {copied === "curl" ? t("已复制", "Copied") : t("复制上报示例", "Copy example")}
+                  </Button>
+                </Stack>
+              )}
+            </DialogContent>
+            <DialogActions sx={{ px: 2.5, pb: 2 }}>
+              <Button size="small" variant="contained" disableElevation onClick={() => setSecretDialog(null)} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>
+                {t("我已保存", "Saved")}
+              </Button>
+            </DialogActions>
+          </Dialog>
+
+          {/* 编辑已注册设备 */}
+          <Dialog open={editing !== null} onClose={() => setEditing(null)} maxWidth="xs" fullWidth>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{zh ? "编辑设备" : "Edit device"}</DialogTitle>
+            <DialogContent>
+              <Stack spacing={2} sx={{ mt: 1 }}>
+                <TextField size="small" label={t("名称", "Name")} value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+                <TextField size="small" label={t("备注", "Note")} multiline minRows={2} value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} />
+              </Stack>
+            </DialogContent>
+            <DialogActions sx={{ px: 2.5, pb: 2 }}>
+              <Button size="small" onClick={() => setEditing(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
+              <Button size="small" variant="contained" disableElevation disabled={busy || !editForm.name.trim()} onClick={() => void saveEdit()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存", "Save")}</Button>
             </DialogActions>
           </Dialog>
 
           {/* 巡航路线 */}
           <Dialog open={routeFor !== null} onClose={() => setRouteFor(null)} maxWidth="md" fullWidth>
             <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
-              {t("规划巡航路线", "Plan cruise route")}
-              {routeFor && (
-                <Typography component="span" sx={{ ml: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                  · {routeFor.name}
-                </Typography>
-              )}
+              {zh ? "规划巡航路线" : "Plan cruise route"}
+              {routeFor && <Typography component="span" sx={{ ml: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>· {routeFor.name}</Typography>}
             </DialogTitle>
             <DialogContent>
               <Stack spacing={1.5}>
@@ -520,12 +618,8 @@ export default function DevicesPage() {
                   )}
                 </Alert>
                 <Stack direction="row" spacing={1}>
-                  <Button size="small" variant="outlined" disabled={busy} onClick={() => void generateFromSource()} sx={{ borderRadius: "999px", textTransform: "none" }}>
-                    {t("基于当前数据源自动生成", "Generate from active source")}
-                  </Button>
-                  <Button size="small" variant="text" disabled={busy || !pointsText.trim()} onClick={() => setPointsText("")} sx={{ borderRadius: "999px", textTransform: "none" }}>
-                    {t("清空", "Clear")}
-                  </Button>
+                  <Button size="small" variant="outlined" disabled={busy} onClick={() => void generateFromSource()} sx={pillBtn}>{t("基于当前数据源自动生成", "Generate from active source")}</Button>
+                  <Button size="small" variant="text" disabled={busy || !pointsText.trim()} onClick={() => setPointsText("")} sx={pillBtn}>{t("清空", "Clear")}</Button>
                 </Stack>
                 <TextField
                   size="small"
@@ -544,18 +638,14 @@ export default function DevicesPage() {
               </Stack>
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" onClick={() => setRouteFor(null)} sx={{ borderRadius: "999px", textTransform: "none" }}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy} onClick={() => void saveRoute()} sx={{ borderRadius: "999px", textTransform: "none" }}>
-                {t("保存巡航路线", "Save route")}
-              </Button>
+              <Button size="small" onClick={() => setRouteFor(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
+              <Button size="small" variant="contained" disableElevation disabled={busy} onClick={() => void saveRoute()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存巡航路线", "Save route")}</Button>
             </DialogActions>
           </Dialog>
 
           {/* 基站 */}
           <Dialog open={stationDialog !== null} onClose={() => setStationDialog(null)} maxWidth="xs" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
-              {stationDialog === "new" ? t("新增基站", "Add station") : t("编辑基站", "Edit station")}
-            </DialogTitle>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{stationDialog === "new" ? t("新增基站", "Add station") : t("编辑基站", "Edit station")}</DialogTitle>
             <DialogContent>
               <Stack spacing={2} sx={{ mt: 1 }}>
                 <TextField size="small" label={t("名称", "Name")} value={stationForm.name} onChange={(e) => setStationForm({ ...stationForm, name: e.target.value })} />
@@ -572,22 +662,13 @@ export default function DevicesPage() {
               </Stack>
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" onClick={() => setStationDialog(null)} sx={{ borderRadius: "999px", textTransform: "none" }}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy || !stationForm.name.trim()} onClick={() => void saveStation()} sx={{ borderRadius: "999px", textTransform: "none" }}>
-                {t("保存", "Save")}
-              </Button>
+              <Button size="small" onClick={() => setStationDialog(null)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
+              <Button size="small" variant="contained" disableElevation disabled={busy || !stationForm.name.trim()} onClick={() => void saveStation()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>{t("保存", "Save")}</Button>
             </DialogActions>
           </Dialog>
 
-          <Snackbar
-            open={notice !== null}
-            autoHideDuration={3500}
-            onClose={() => setNotice(null)}
-            anchorOrigin={{ vertical: "top", horizontal: "center" }}
-          >
-            <Alert severity={notice?.kind ?? "info"} variant="outlined" onClose={() => setNotice(null)} sx={{ borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.95)" }}>
-              {notice?.text}
-            </Alert>
+          <Snackbar open={notice !== null} autoHideDuration={4000} onClose={() => setNotice(null)} anchorOrigin={{ vertical: "top", horizontal: "center" }}>
+            <Alert severity={notice?.kind ?? "info"} variant="outlined" onClose={() => setNotice(null)} sx={{ borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.95)" }}>{notice?.text}</Alert>
           </Snackbar>
         </Box>
       </Box>
@@ -598,12 +679,8 @@ export default function DevicesPage() {
 function StatCell({ label, value, last }: { label: string; value: string; last?: boolean }) {
   return (
     <Box sx={{ flex: 1, minWidth: 0, px: 2, py: 0.5, borderRight: last ? "none" : "1px solid var(--pm-color-divider)" }}>
-      <Typography sx={{ fontSize: 11, color: "var(--pm-color-text-hint)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-        {label}
-      </Typography>
-      <Typography sx={{ mt: 0.5, fontSize: 20, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>
-        {value}
-      </Typography>
+      <Typography sx={{ fontSize: 11, color: "var(--pm-color-text-hint)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</Typography>
+      <Typography sx={{ mt: 0.5, fontSize: 20, fontWeight: 600, color: "var(--pm-color-text-primary)" }}>{value}</Typography>
     </Box>
   );
 }

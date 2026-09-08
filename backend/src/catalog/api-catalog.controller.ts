@@ -56,10 +56,20 @@ const ENTRIES: ApiDocEntry[] = [
     response: [{ id: 1, name: "机器人A", type: "crawler", status: "online", description: null }],
   },
   {
-    id: "devices-create", group: "设备与基站", method: "POST", path: `${P}/devices`,
-    title: "新增设备", summary: "新增管道机器人或无人机。", requiresAuth: false,
-    body: { name: "机器人A", type: "crawler", status: "offline", description: "井下 1 号" },
-    response: { id: 1, name: "机器人A", type: "crawler", status: "offline" },
+    id: "devices-register", group: "设备与基站", method: "POST", path: `${P}/devices/register`,
+    title: "注册设备（待审批）", summary: "设备端发起注册申请，进入待审批状态；批准前无法上报数据（不签发凭据）。", requiresAuth: false,
+    body: { name: "机器人A", type: "crawler", description: "井下 1 号" },
+    response: { id: 1, name: "机器人A", type: "crawler", state: "pending" },
+  },
+  {
+    id: "devices-approve", group: "设备与基站", method: "POST", path: `${P}/devices/:id/approve`,
+    title: "审批同意并签发密钥", summary: "管理端同意入网，一次性返回设备密钥（仅此一次，请立即配置到设备）。", requiresAuth: false,
+    response: { device: { id: 1, name: "机器人A", state: "approved" }, secret: "…64 位十六进制密钥…" },
+  },
+  {
+    id: "devices-reject", group: "设备与基站", method: "POST", path: `${P}/devices/:id/reject`,
+    title: "拒绝入网", summary: "管理端拒绝设备注册申请。", requiresAuth: false,
+    response: { ok: true },
   },
   {
     id: "devices-update", group: "设备与基站", method: "PATCH", path: `${P}/devices/:id`,
@@ -85,7 +95,8 @@ const ENTRIES: ApiDocEntry[] = [
   },
   {
     id: "devices-telemetry-push", group: "设备与基站", method: "POST", path: `${P}/devices/:id/telemetry`,
-    title: "推送设备遥测", summary: "外部设备/检测终端上报实时位置，经 Socket 广播 `pm:telemetry`。", requiresAuth: false,
+    title: "上报设备遥测", summary: "设备携带批准签发的密钥（Header: x-device-key）上报实时位置，校验后经 Socket 广播 `pm:telemetry`。", requiresAuth: false,
+    query: { "x-device-key": "设备密钥（必填）" },
     body: { lon: 126.9, lat: 46.61, heading: 90, speed: 1.2, battery: 88, status: "online" },
     response: { deviceId: 1, lon: 126.9, lat: 46.61, heading: 90, speed: 1.2, battery: 88, status: "online", ts: 1 },
   },

@@ -19,9 +19,20 @@ export class Device {
   @Column({ length: 20 })
   type: "crawler" | "drone";
 
-  /** offline | online | busy | fault */
+  /** offline | online | busy | fault（运行时状态） */
   @Column({ length: 20, default: "offline" })
   status: string;
+
+  /** 注册状态：pending(待审批) | approved(已注册) | rejected(已拒绝) | revoked(已注销) */
+  @Column({ length: 20, default: "pending" })
+  state: string;
+
+  /** 批准后签发的一次性设备密钥（遥测/指令鉴权用，仅展示一次） */
+  @Column({ type: "text", nullable: true })
+  secretKey: string | null;
+
+  @Column({ type: "datetime", nullable: true })
+  registeredAt: Date | null;
 
   @Column({ type: "text", nullable: true })
   description: string | null;

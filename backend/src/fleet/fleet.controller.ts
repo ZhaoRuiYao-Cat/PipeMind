@@ -1,5 +1,17 @@
 // 设备 / 基站 / 巡航路线 控制器（REST API，全部 @Public 供外部调用/文档可看）
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Put } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Put,
+} from "@nestjs/common";
 import { Public } from "../auth/decorators/public.decorator.js";
 import { FleetService, type TelemetryPoint } from "./fleet.service.js";
 import { FleetGateway } from "./fleet.gateway.js";
@@ -14,7 +26,7 @@ export class DevicesController {
   ) {}
 
   @Get()
-  list(): Promise<Device[]> {
+  list() {
     return this.fleet.listDevices();
   }
 
@@ -23,9 +35,47 @@ export class DevicesController {
     return { devices: this.fleet.latestTelemetry() };
   }
 
-  @Post()
-  create(@Body() body: Partial<Device>) {
-    return this.fleet.createDevice(body ?? {});
+  /**
+   * 设备入网第一步：设备端提交注册申请（名称/类型），进入“待审批”状态。
+   * 安全设计：本接口不签发任何凭据，批准前设备无法上报数据。
+   */
+  @Post("register")
+  register(@Body() body: Partial<Device>) {
+    return this.fleet.registerDevice(body ?? {});
+  }
+
+  /** 管理端审批同意：一次性返回设备密钥（请立即配置到设备并妥善保管） */
+  @Post(":id/approve")
+  approve(@Param("id", ParseIntPipe) id: number) {
+    return this.fleet.approveDevice(id);
+  }
+
+  /** 管理端拒绝入网 */
+  @Post(":id/reject")
+  async reject(@Param("id", ParseIntPipe) id: number) {
+    await this.fleet.rejectDevice(id);
+    return { ok: true };
+  }
+
+  /** 注销设备（吊销密钥） */
+  @Post(":id/revoke")
+  async revoke(@Param("id", ParseIntPipe) id: number) {
+    await this.fleet.revokeDevice(id);
+    return { ok: true };
+  }
+
+  /** 设备端轮询注册状态（仅返回状态，不含密钥） */
+  @Get(":id/registration")
+  async registration(@Param("id", ParseIntPipe) id: number) {
+    const device = await this.fleet.getDevice(id);
+    if (!device) {
+      return { state: "unknown" };
+    }
+    return {
+      id: device.id,
+      state: device.state,
+      registeredAt: device.registeredAt,
+    };
   }
 
   @Get(":id")
@@ -64,18 +114,26 @@ export class DevicesController {
     return this.fleet.saveRoute(id, body ?? { points: [] });
   }
 
-  // 真实遥测推送：外部设备/探伤终端 POST 后由 Socket 实时广播到前端
+  /**
+   * 真实遥测推送：设备端携带批准时签发的密钥（Header: x-device-key）上报，
+   * 校验通过后经 Socket 广播 `pm:telemetry` 到前端地图。
+   */
   @Post(":id/telemetry")
   @HttpCode(200)
-  telemetry(@Param("id", ParseIntPipe) id: number, @Body() body: Partial<TelemetryPoint>) {
+  async telemetry(
+    @Param("id", ParseIntPipe) id: number,
+    @Headers("x-device-key") deviceKey: string | undefined,
+    @Body() body: Partial<TelemetryPoint>,
+  ) {
+    const device = await this.fleet.authorizeDevice(id, deviceKey);
     const point = this.fleet.pushTelemetry({
-      deviceId: id,
+      deviceId: device.id,
       lon: Number(body?.lon ?? 0),
       lat: Number(body?.lat ?? 0),
       heading: body?.heading,
       speed: body?.speed,
       battery: body?.battery,
-      status: body?.status,
+      status: body?.status ?? "online",
       ts: body?.ts,
     });
     this.gateway.broadcastTelemetry(point);

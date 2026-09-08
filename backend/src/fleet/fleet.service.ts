@@ -1,6 +1,12 @@
-// 设备/基站/巡航路线 数据访问与业务逻辑（含遥测缓存）
-import { Injectable } from "@nestjs/common";
+// 设备/基站/巡航路线 数据访问与业务逻辑（含注册审批与遥测鉴权）
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  UnauthorizedException,
+} from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Repository } from "typeorm";
 import { Device, DeviceRoute, BaseStation } from "./entities/fleet.entities.js";
 
@@ -30,12 +36,21 @@ export class FleetService {
   ) {}
 
   // ---------- 设备 CRUD ----------
-  listDevices(): Promise<Device[]> {
-    return this.deviceRepo.find({ order: { createdAt: "ASC" } });
+  /** 脱敏视图：设备密钥永不随列表/详情返回（仅在批准时一次性下发） */
+  private toView(device: Device): Omit<Device, "secretKey"> {
+    const { secretKey: _secret, ...rest } = device;
+    void _secret;
+    return rest;
   }
 
-  getDevice(id: number): Promise<Device | null> {
-    return this.deviceRepo.findOneBy({ id });
+  async listDevices() {
+    const rows = await this.deviceRepo.find({ order: { createdAt: "ASC" } });
+    return rows.map((row) => this.toView(row));
+  }
+
+  async getDevice(id: number) {
+    const row = await this.deviceRepo.findOneBy({ id });
+    return row ? this.toView(row) : null;
   }
 
   createDevice(input: Partial<Device>): Promise<Device> {
@@ -43,20 +58,92 @@ export class FleetService {
       name: input.name ?? "未命名设备",
       type: input.type === "drone" ? "drone" : "crawler",
       status: input.status ?? "offline",
+      state: "pending",
+      secretKey: null,
+      registeredAt: null,
       description: input.description ?? null,
     });
     return this.deviceRepo.save(device);
   }
 
-  async updateDevice(id: number, patch: Partial<Device>): Promise<Device> {
+  // ---------- 设备入网：设备发起注册 → 管理端审批 ----------
+  /** 设备端调用：提交注册申请，进入待审批状态（不发放任何凭据） */
+  async registerDevice(input: Partial<Device>) {
+    const name = (input.name ?? "").trim();
+    if (!name) throw new BadRequestException("设备名称不能为空");
+    const type = input.type === "drone" ? "drone" : input.type === "crawler" ? "crawler" : "crawler";
+    const device = this.deviceRepo.create({
+      name: name.slice(0, 64),
+      type,
+      status: "offline",
+      state: "pending",
+      secretKey: null,
+      registeredAt: null,
+      description: input.description?.slice(0, 500) ?? null,
+    });
+    const saved = await this.deviceRepo.save(device);
+    return this.toView(saved);
+  }
+
+  /** 管理端审批同意：一次性签发设备密钥（仅此一次返回） */
+  async approveDevice(id: number): Promise<{ device: Omit<Device, "secretKey">; secret: string }> {
+    const device = await this.deviceRepo.findOneByOrFail({ id });
+    if (device.state === "approved" && device.secretKey) {
+      throw new ConflictException("该设备已注册；密钥只在批准时返回一次，请勿重复审批");
+    }
+    const secret = randomBytes(32).toString("hex");
+    device.state = "approved";
+    device.secretKey = secret;
+    device.registeredAt = new Date();
+    device.status = "offline";
+    const saved = await this.deviceRepo.save(device);
+    return { device: this.toView(saved), secret };
+  }
+
+  /** 管理端拒绝入网 */
+  async rejectDevice(id: number) {
+    const device = await this.deviceRepo.findOneByOrFail({ id });
+    if (device.state !== "pending") throw new ConflictException("仅待审批的设备可以被拒绝");
+    device.state = "rejected";
+    device.secretKey = null;
+    device.registeredAt = null;
+    const saved = await this.deviceRepo.save(device);
+    return this.toView(saved);
+  }
+
+  /** 注销已注册设备（吊销密钥） */
+  async revokeDevice(id: number) {
+    const device = await this.deviceRepo.findOneByOrFail({ id });
+    device.state = "revoked";
+    device.secretKey = null;
+    device.status = "offline";
+    const saved = await this.deviceRepo.save(device);
+    return this.toView(saved);
+  }
+
+  /** 遥测/指令鉴权：设备密钥必须与批准时签发的一致 */
+  async authorizeDevice(id: number, secret: string | undefined): Promise<Device> {
+    const device = await this.deviceRepo.findOneByOrFail({ id });
+    if (!secret || device.state !== "approved" || !device.secretKey) {
+      throw new UnauthorizedException("设备未注册或密钥缺失");
+    }
+    const a = Buffer.from(device.secretKey, "hex");
+    const b = Buffer.from(String(secret), "hex");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new UnauthorizedException("设备密钥无效");
+    }
+    return device;
+  }
+
+  async updateDevice(id: number, patch: Partial<Device>) {
     const device = await this.deviceRepo.findOneByOrFail({ id });
     Object.assign(device, {
       ...(patch.name !== undefined ? { name: patch.name } : {}),
-      ...(patch.type !== undefined ? { type: patch.type } : {}),
       ...(patch.status !== undefined ? { status: patch.status } : {}),
       ...(patch.description !== undefined ? { description: patch.description } : {}),
     });
-    return this.deviceRepo.save(device);
+    const saved = await this.deviceRepo.save(device);
+    return this.toView(saved);
   }
 
   async removeDevice(id: number): Promise<void> {
