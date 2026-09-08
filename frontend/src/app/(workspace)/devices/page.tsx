@@ -21,7 +21,6 @@ import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
-import AddRounded from "@mui/icons-material/AddRounded";
 import CellTowerRounded from "@mui/icons-material/CellTowerRounded";
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
@@ -31,7 +30,6 @@ import EditOutlined from "@mui/icons-material/EditOutlined";
 import FlightTakeoffRounded from "@mui/icons-material/FlightTakeoffRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import RouteRounded from "@mui/icons-material/RouteRounded";
-import SensorDoorRounded from "@mui/icons-material/SensorDoorRounded";
 import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import { useI18n } from "@/lib/i18n";
 import { pmTheme } from "@/lib/theme";
@@ -128,10 +126,6 @@ export default function DevicesPage() {
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // 注册申请
-  const [registerOpen, setRegisterOpen] = useState(false);
-  const [registerForm, setRegisterForm] = useState({ name: "", type: "crawler", description: "" });
-
   // 审批密钥（一次性展示）
   const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
   const [copied, setCopied] = useState<"secret" | "curl" | null>(null);
@@ -178,22 +172,7 @@ export default function DevicesPage() {
     return [...list].sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.createdAt.localeCompare(b.createdAt));
   }, [devices]);
 
-  // ---------- 设备入网 ----------
-  const submitRegister = async (): Promise<void> => {
-    setBusy(true);
-    try {
-      await jfetch("/devices/register", { method: "POST", body: JSON.stringify(registerForm) });
-      setRegisterOpen(false);
-      setRegisterForm({ name: "", type: "crawler", description: "" });
-      setNotice({ kind: "success", text: t("注册申请已提交，等待管理端审批", "Registration submitted; awaiting approval") });
-      await refresh();
-    } catch (err) {
-      setNotice({ kind: "error", text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  // ---------- 设备入网审批 ----------
   const approveDevice = async (device: DeviceItem): Promise<void> => {
     if (!globalThis.confirm(t(`同意“${device.name}”入网？批准后将签发一次性设备密钥。`, `Approve "${device.name}"? A one-time secret will be issued.`))) return;
     setBusy(true);
@@ -386,9 +365,6 @@ export default function DevicesPage() {
               <Button size="small" variant="outlined" startIcon={<CellTowerRounded sx={{ fontSize: 15 }} />} onClick={() => { setStationDialog("new"); setStationForm({ name: "", lon: "", lat: "", purpose: "charging", description: "" }); }} sx={{ ...pillBtn, color: "var(--pm-color-text-secondary)", borderColor: "var(--pm-color-border)", "&:hover": { borderColor: "#1664ff", color: "#1664ff" } }}>
                 {zh ? "新增基站" : "Add station"}
               </Button>
-              <Button size="small" variant="contained" disableElevation startIcon={<SensorDoorRounded sx={{ fontSize: 16 }} />} onClick={() => { setRegisterOpen(true); setRegisterForm({ name: "", type: "crawler", description: "" }); }} sx={{ ...pillBtn, color: "var(--pm-color-primary-contrast, #fff)", backgroundColor: "#1664ff", "&:hover": { backgroundColor: "#0f54d6" } }}>
-                {zh ? "注册设备" : "Register device"}
-              </Button>
             </Stack>
           </Stack>
 
@@ -421,7 +397,7 @@ export default function DevicesPage() {
                 {orderedDevices.length === 0 ? (
                   <Box sx={{ p: 5, textAlign: "center" }}>
                     <Typography sx={{ fontSize: 13, color: "var(--pm-color-text-hint)" }}>
-                      {zh ? "暂无设备。请设备端调用“注册设备”申请入网，批准后即可接入。" : "No devices yet. Have devices register and approve them here."}
+                      {zh ? "暂无设备。设备端通过 POST /api/devices/register 发起入网申请，待审批的设备将出现在此处。" : "No devices yet. Devices apply via POST /api/devices/register; pending requests appear here."}
                     </Typography>
                   </Box>
                 ) : (
@@ -524,32 +500,6 @@ export default function DevicesPage() {
               </Paper>
             </>
           )}
-
-          {/* 注册申请 */}
-          <Dialog open={registerOpen} onClose={() => setRegisterOpen(false)} maxWidth="xs" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{zh ? "注册设备" : "Register device"}</DialogTitle>
-            <DialogContent>
-              <Alert severity="info" sx={{ mb: 2, borderRadius: "12px" }}>
-                {zh
-                  ? "模拟设备端发起注册：提交后设备进入“待审批”，由管理端同意后签发一次性密钥，设备方可上报数据。"
-                  : "Device-initiated registration: after approval the device receives a one-time secret before it can report."}
-              </Alert>
-              <Stack spacing={2}>
-                <TextField size="small" label={t("设备名称", "Device name")} value={registerForm.name} onChange={(e) => setRegisterForm({ ...registerForm, name: e.target.value })} />
-                <Select size="small" value={registerForm.type} onChange={(e) => setRegisterForm({ ...registerForm, type: e.target.value })}>
-                  <MenuItem value="crawler">{t("管道机器人", "Crawler")}</MenuItem>
-                  <MenuItem value="drone">{t("无人机", "Drone")}</MenuItem>
-                </Select>
-                <TextField size="small" label={t("备注", "Note")} multiline minRows={2} value={registerForm.description} onChange={(e) => setRegisterForm({ ...registerForm, description: e.target.value })} />
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 2.5, pb: 2 }}>
-              <Button size="small" onClick={() => setRegisterOpen(false)} sx={pillBtn}>{t("取消", "Cancel")}</Button>
-              <Button size="small" variant="contained" disableElevation disabled={busy || !registerForm.name.trim()} onClick={() => void submitRegister()} sx={{ ...pillBtn, color: "#fff", backgroundColor: "#1664ff" }}>
-                {t("提交注册申请", "Submit request")}
-              </Button>
-            </DialogActions>
-          </Dialog>
 
           {/* 密钥发放（一次性） */}
           <Dialog open={secretDialog !== null} onClose={() => setSecretDialog(null)} maxWidth="sm" fullWidth>
