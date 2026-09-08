@@ -12,6 +12,7 @@ import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
 import HubOutlined from "@mui/icons-material/HubOutlined";
 import FolderSharedRounded from "@mui/icons-material/FolderSharedRounded";
+import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import { useI18n } from "@/lib/i18n";
 
 interface NavEntry {
@@ -27,6 +28,12 @@ const NAV_ENTRIES: NavEntry[] = [
     path: "/home",
     textKey: "navHome",
     icon: <HomeRounded sx={{ fontSize: 20 }} />,
+  },
+  {
+    key: "devices",
+    path: "/devices",
+    textKey: "navDevices",
+    icon: <SmartToyRounded sx={{ fontSize: 20 }} />,
   },
   {
     key: "agent",
