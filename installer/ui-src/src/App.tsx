@@ -585,15 +585,14 @@ export default function App() {
                   密钥与高级 / Keys &amp; Advanced
                 </Typography>
                 <Alert severity="info" sx={{ mb: 2 }}>
-                  RSA 密钥用于登录口令加密。默认<b>自动生成</b>：无需预置任何文件。
-                  如需自定义，请<b>直接粘贴 PEM 密钥内容</b>（不再填写文件路径）：
-                  可只填私钥（自动推导公钥），或私钥与公钥成对填写（将校验是否匹配）。
+                  RSA 密钥用于登录口令加密。<b>两框均留空 = 自动生成（或沿用已有密钥）</b>，无需预置任何文件。
+                  如需自定义，请<b>直接粘贴 PEM 密钥内容</b>：可只填私钥（自动推导公钥），或私钥与公钥成对填写（将校验是否匹配）。
                 </Alert>
                 <Stack spacing={2}>
                   {/* 私钥 / 公钥：左右排布、小圆角、多行 */}
                   <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: "stretch" }}>
                     <TextField
-                      label="RSA 私钥（PEM，可留空=自动生成）"
+                      label="RSA 私钥（PEM，可留空）"
                       value={rsaPrivatePem}
                       onChange={(e) => setRsaPrivatePem(e.target.value)}
                       multiline
@@ -609,7 +608,7 @@ export default function App() {
                       }}
                     />
                     <TextField
-                      label="RSA 公钥（PEM，可留空；填了私钥则自动推导）"
+                      label="RSA 公钥（PEM，可留空）"
                       value={rsaPublicPem}
                       onChange={(e) => setRsaPublicPem(e.target.value)}
                       multiline
