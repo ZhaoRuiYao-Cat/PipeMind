@@ -7,7 +7,10 @@ import { AppModule } from './app.module.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
-  const origins = (process.env.CORS_ORIGIN ?? 'http://localhost:3000')
+  const origins = (
+    process.env.CORS_ORIGIN ??
+    'http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500'
+  )
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
