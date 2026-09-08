@@ -163,12 +163,29 @@ export function GisSourcePicker() {
   const t = (zhText: string, enText: string): string =>
     zh ? zhText : enText;
 
-  const setActiveKind = (kind: "file" | "api"): void => {
+  // 同步写入 localStorage（null/undefined 即删除）
+  const writeLocal = (key: string, value: unknown): void => {
     try {
-      globalThis.localStorage.setItem(ACTIVE_KIND_KEY, JSON.stringify(kind));
+      if (value === null || value === undefined) {
+        globalThis.localStorage.removeItem(key);
+      } else {
+        globalThis.localStorage.setItem(key, JSON.stringify(value));
+      }
     } catch {
       void 0;
     }
+  };
+
+  // 先同步持久化所需键位，再派发变更事件：
+  // 避免"首次选择"时事件先于存储写入触发，导致首页场景漏读数据（第二次点击才生效）
+  const activate = (
+    kind: "file" | "api",
+    entries: Array<[string, unknown]> = [],
+  ): void => {
+    for (const [key, value] of entries) {
+      writeLocal(key, value);
+    }
+    writeLocal(ACTIVE_KIND_KEY, kind);
     dispatchGisActiveChange();
   };
 
@@ -314,10 +331,11 @@ export function GisSourcePicker() {
         direction="row"
         data-guide={withOwner ? `gis-shared-${file.id}` : `gis-file-${file.id}`}
         onClick={() => {
-          setPicked({ id: file.id, name: file.name });
+          const next = { id: file.id, name: file.name };
+          setPicked(next);
           setSelectedKind("file");
           setViewMode("chosen");
-          setActiveKind("file");
+          activate("file", [[FILE_KEY, next]]);
         }}
         sx={{
           alignItems: "center",
@@ -423,11 +441,15 @@ export function GisSourcePicker() {
       url,
       token: token.length > 0 ? token : undefined,
     };
-    setApiSources((current) => [...current, item]);
+    const nextSources = [...apiSources, item];
+    setApiSources(nextSources);
     setApiPickedId(item.id);
     setSelectedKind("api");
     setViewMode("chosen");
-    setActiveKind("api");
+    activate("api", [
+      [API_SOURCES_KEY, nextSources],
+      [API_PICKED_KEY, item.id],
+    ]);
     setAddingApi(false);
     setApiDraftName("");
     setApiDraftUrl("");
@@ -436,11 +458,16 @@ export function GisSourcePicker() {
   };
 
   const removeApiSource = (id: number): void => {
-    setApiSources((current) => current.filter((item) => item.id !== id));
-    setApiPickedId((current) => (current === id ? null : current));
-    if (apiPickedId === id) {
+    const nextSources = apiSources.filter((item) => item.id !== id);
+    const removedActive = apiPickedId === id;
+    setApiSources(nextSources);
+    setApiPickedId(removedActive ? null : apiPickedId);
+    writeLocal(API_SOURCES_KEY, nextSources);
+    if (removedActive) {
       setSelectedKind(null);
       setViewMode("select");
+      writeLocal(API_PICKED_KEY, null);
+      dispatchGisActiveChange();
     }
   };
 
@@ -850,7 +877,7 @@ export function GisSourcePicker() {
                       setApiPickedId(item.id);
                       setSelectedKind("api");
                       setViewMode("chosen");
-                      setActiveKind("api");
+                      activate("api", [[API_PICKED_KEY, item.id]]);
                     }}
                     sx={{
                       alignItems: "center",
