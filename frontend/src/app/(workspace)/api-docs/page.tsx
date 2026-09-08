@@ -124,7 +124,7 @@ export default function ApiDocsPage() {
           pb: 24,
         }}
       >
-        <Box sx={{ width: "100%", maxWidth: 1120, mx: "auto" }}>
+        <Box sx={{ width: "100%", maxWidth: 880, mx: "auto" }}>
           <Stack direction="row" spacing={2} sx={{ alignItems: "flex-start", mb: 4 }}>
             <Box sx={{ flex: 1 }}>
               <Typography sx={{ fontSize: 22, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>
