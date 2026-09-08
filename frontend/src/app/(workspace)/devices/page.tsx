@@ -352,7 +352,7 @@ export default function DevicesPage() {
   return (
     <ThemeProvider theme={pmTheme}>
       <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: { xs: 2.5, sm: 4, md: 10 }, pt: { xs: 10, sm: 12 }, pb: 24 }}>
-        <Box sx={{ width: "100%", maxWidth: 960, mx: "auto" }}>
+        <Box sx={{ width: "100%", maxWidth: 880, mx: "auto" }}>
           <Stack direction="row" spacing={2} sx={{ alignItems: "flex-start", mb: 4 }}>
             <Box sx={{ flex: 1 }}>
               <Typography sx={{ fontSize: 22, fontWeight: 700, color: "var(--pm-color-text-primary)" }}>{T.title[lang]}</Typography>
