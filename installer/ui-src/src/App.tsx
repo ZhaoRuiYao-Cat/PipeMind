@@ -260,7 +260,8 @@ export default function App() {
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
-      <Paper elevation={0} sx={{ p: 3, border: "1px solid rgba(22,100,255,0.18)", borderRadius: 3 }}>
+      {/* 无界设计：不包裹整体卡片，内容直接铺在页面背景上（宽度保持不变） */}
+      <Box sx={{ py: 2 }}>
         {/* 品牌头 */}
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
           <Box sx={{ flex: 1 }}>
@@ -362,7 +363,7 @@ export default function App() {
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
               开始前先确认目标机器满足以下条件（Node.js ≥ 20、MySQL 8、端口可用）。
             </Typography>
-            <Paper variant="outlined" sx={{ bgcolor: "background.default" }}>
+            <Box>
               {checksLoading ? (
                 <Box sx={{ p: 3 }}>
                   <LinearProgress />
@@ -380,7 +381,7 @@ export default function App() {
                   ))}
                 </List>
               )}
-            </Paper>
+            </Box>
             <Typography variant="body2" color={checkOk ? "success.main" : "error.main"} sx={{ mt: 2 }}>
               {checks?.summary ?? "…"}
             </Typography>
@@ -559,7 +560,7 @@ export default function App() {
                 初始管理员账号已就绪，可使用以下地址访问系统
               </Typography>
             </Stack>
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+            <Box sx={{ mb: 2 }}>
               <List dense disablePadding>
                 <ListItem divider>
                   <ListItemText primary="系统入口" secondary={frontendOrigin} />
@@ -571,7 +572,7 @@ export default function App() {
                   <ListItemText primary="初始管理员" secondary={`${adminUser || "PipeMind"} / ${adminPassword || "PipeMind"}`} />
                 </ListItem>
               </List>
-            </Paper>
+            </Box>
             {/* 返回 / 打开系统 统一靠右 */}
             <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end" }}>
               <Button variant="outlined" onClick={() => goTo(0, "back")}>
@@ -588,7 +589,7 @@ export default function App() {
           </Box>
         )}
         </Box>
-      </Paper>
+      </Box>
 
       <Stack direction="row" alignItems="center" spacing={1} sx={{ justifyContent: "center", mt: 3 }}>
         <InfoRounded sx={{ fontSize: 15, color: "text.hint" }} />

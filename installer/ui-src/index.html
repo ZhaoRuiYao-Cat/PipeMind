@@ -7,6 +7,9 @@
     <style>
       html, body, #root { height: 100%; margin: 0; }
       body { background: #f5f7fa; }
+      /* 隐藏原生滚动条（仍可滚动） */
+      * { scrollbar-width: none; -ms-overflow-style: none; }
+      *::-webkit-scrollbar { width: 0; height: 0; display: none; }
     </style>
   </head>
   <body>
