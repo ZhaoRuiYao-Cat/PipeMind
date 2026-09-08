@@ -3,10 +3,10 @@
 // 零运行时依赖：仅使用 Node 内置模块，静态资源取自 installer/dist。
 // 启动：node installer/server.mjs [--port 4200] [--open|--no-open]
 import { createServer } from "node:http";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { readJson, UI_DIR, DEFAULT_PORT, IS_WIN, readEnvMap, BACKEND } from "./lib/common.mjs";
+import { readJson, UI_DIR, DEFAULT_PORT, IS_WIN, readEnvMap, BACKEND, FRONTEND, RUNTIME_FILE } from "./lib/common.mjs";
 import { runChecks } from "./lib/checks.mjs";
 import { InstallJob, services, isInstalled, STEPS } from "./lib/installer.mjs";
 
@@ -133,6 +133,28 @@ const server = createServer(async (req, res) => {
       sendJson(res, 202, { id: job.id });
       return;
     }
+    if (pathname === "/api/install/active" && req.method === "GET") {
+      // 进程检测：若存在正在执行/排队/已暂停的安装任务，直接返回供前端跳到终端页
+      const j = activeJob;
+      if (j && ["queued", "running", "paused"].includes(j.status)) {
+        sendJson(res, 200, { active: true, job: j.snapshot() });
+      } else {
+        sendJson(res, 200, { active: false, job: null });
+      }
+      return;
+    }
+    const jobAction = /^\/api\/jobs\/([^/]+)\/(pause|resume)$/.exec(pathname);
+    if (jobAction && req.method === "POST") {
+      const job = jobs.get(jobAction[1]);
+      if (!job) {
+        sendJson(res, 404, { error: "job not found" });
+        return;
+      }
+      if (jobAction[2] === "pause") job.pause();
+      else job.resume();
+      sendJson(res, 200, job.snapshot());
+      return;
+    }
     const jobMatch = /^\/api\/jobs\/([^/]+)$/.exec(pathname);
     if (jobMatch && req.method === "GET") {
       const job = jobs.get(jobMatch[1]);
@@ -155,6 +177,24 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/stop" && req.method === "POST") {
       services.stop();
       sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (pathname === "/api/reset" && req.method === "POST") {
+      // 清除缓存重来：停止服务并删除安装器生成的配置/运行状态（不动数据库与依赖目录）
+      services.stop();
+      const targets = [
+        join(BACKEND, ".env"),
+        join(FRONTEND, ".env.local"),
+        RUNTIME_FILE,
+      ];
+      for (const file of targets) {
+        try {
+          if (existsSync(file)) unlinkSync(file);
+        } catch {
+          /* 忽略单文件清理失败 */
+        }
+      }
+      sendJson(res, 200, { ok: true, installed: isInstalled() });
       return;
     }
     if (pathname === "/api/logs" && req.method === "GET") {

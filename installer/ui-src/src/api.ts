@@ -36,7 +36,8 @@ export interface StepState {
 
 export interface JobSnapshot {
   id: string;
-  status: "queued" | "running" | "done" | "error";
+  status: "queued" | "running" | "paused" | "done" | "error";
+  paused: boolean;
   error: string | null;
   current: number;
   steps: StepState[];
@@ -50,6 +51,11 @@ export interface InstallOptions {
   backendPort: string;
   frontendPort: string;
   frontendOrigin: string;
+}
+
+export interface ActiveJobResult {
+  active: boolean;
+  job: JobSnapshot | null;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -77,7 +83,11 @@ export const api = {
   install: (opts: InstallOptions) =>
     fetchJson<{ id: string }>("/api/install", { method: "POST", body: JSON.stringify(opts) }),
   job: (id: string) => fetchJson<JobSnapshot>(`/api/jobs/${id}`),
+  active: () => fetchJson<ActiveJobResult>("/api/install/active"),
+  pause: (id: string) => fetchJson<JobSnapshot>(`/api/jobs/${id}/pause`, { method: "POST", body: "{}" }),
+  resume: (id: string) => fetchJson<JobSnapshot>(`/api/jobs/${id}/resume`, { method: "POST", body: "{}" }),
   start: (opts: { backendPort?: string; frontendPort?: string }) =>
     fetchJson<{ ok: boolean }>("/api/start", { method: "POST", body: JSON.stringify(opts) }),
   stop: () => fetchJson<{ ok: boolean }>("/api/stop", { method: "POST", body: "{}" }),
+  reset: () => fetchJson<{ ok: boolean; installed: boolean }>("/api/reset", { method: "POST", body: "{}" }),
 };

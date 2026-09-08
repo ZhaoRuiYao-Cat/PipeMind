@@ -1,4 +1,4 @@
-// PipeMind Installer —— 一键安装编排（Flarum 式分步执行）
+// PipeMind Installer —— 一键安装编排（Flarum 式分步执行，支持暂停/继续）
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -7,13 +7,14 @@ import {
   RUNTIME_FILE,
   npmCmd,
   run,
-  readEnvMap,
   writeEnvFile,
   writeJson,
   mysqlConnect,
   httpGet,
   wait,
+  killTree,
   isNonEmpty,
+  readEnvMap,
 } from "./common.mjs";
 import { runChecks, validateOptions } from "./checks.mjs";
 import { Services } from "./services.mjs";
@@ -32,6 +33,7 @@ export const STEPS = [
 ];
 
 const LOG_CAP = 600;
+const PAUSE_ABORT = "__PAUSE_ABORT__";
 
 function now() {
   return new Date().toISOString();
@@ -41,13 +43,19 @@ export class InstallJob {
   constructor(opts) {
     this.id = randomUUID();
     this.opts = opts;
-    this.status = "queued"; // queued | running | done | error
+    this.status = "queued"; // queued | running | done | error | paused
     this.error = null;
     this.current = -1;
-    this.stepState = STEPS.map(() => "pending"); // pending | running | done | error | skipped
+    this.stepState = STEPS.map(() => "pending"); // pending | running | done | error | paused
     this.logs = [];
     this.startedAt = null;
     this.finishedAt = null;
+    // 暂停控制
+    this.pauseRequested = false;
+    this.paused = false;
+    this.pendingIndex = 0; // 被打断后需要重新执行的步骤
+    this.activeChild = null; // 当前长任务子进程（供暂停时中断）
+    this.cancelled = false;
   }
 
   pushLog(text, level = "info") {
@@ -64,6 +72,7 @@ export class InstallJob {
     return {
       id: this.id,
       status: this.status,
+      paused: this.paused,
       error: this.error,
       current: this.current,
       steps: STEPS.map((s, i) => ({ ...s, state: this.stepState[i] })),
@@ -74,159 +83,69 @@ export class InstallJob {
     };
   }
 
+  // 暂停：请求暂停；正在跑长任务(依赖/编译/启动)时立即中断其子进程
+  pause() {
+    if (this.status === "done" || this.status === "error") return;
+    this.pauseRequested = true;
+    this.paused = true;
+    if (this.activeChild) {
+      killTree(this.activeChild);
+      this.activeChild = null;
+    }
+    this.pushLog("收到暂停请求：当前步骤将被中断，可在准备就绪后继续。", "warn");
+  }
+
+  resume() {
+    if (!this.pauseRequested && this.status !== "paused") return;
+    this.pauseRequested = false;
+    this.paused = false;
+    this.pushLog("已继续安装…");
+    if (this.status === "paused") this.status = "running";
+  }
+
   async run() {
     this.status = "running";
     this.startedAt = now();
     const o = this.opts;
+    const steps = [
+      () => this.stepPreflight(o),
+      () => this.stepWriteConfig(o),
+      () => this.stepBackendDeps(),
+      () => this.stepDatabase(o),
+      () => this.stepBackendBuild(),
+      () => this.stepFrontendDeps(),
+      () => this.stepFrontendBuild(),
+      () => this.stepBoot(o),
+    ];
     try {
-      // 1. 预检
-      await this.execStep(0, async () => {
-        const problems = validateOptions(o);
-        if (problems.length) throw new Error(problems.join("；"));
-        const checks = await runChecks();
-        if (!checks.ok) {
-          throw new Error(
-            "环境预检未通过：" + checks.items.filter((i) => !i.ok).map((i) => i.label).join("、"),
-          );
+      let i = 0;
+      while (i < steps.length) {
+        // 暂停闸门：在步骤边界等待"继续"
+        if (this.pauseRequested || this.paused) {
+          this.paused = true;
+          this.pauseRequested = true;
+          this.status = "paused";
+          this.current = i;
+          if (this.stepState[i] !== "running") {
+            this.pushLog(`安装已暂停（将从「${STEPS[i].label}」继续）。`, "warn");
+          }
+          await this.waitWhilePaused();
+          this.status = "running";
         }
-        this.pushLog("环境预检通过：Node " + process.version);
-      });
-
-      // 2. 写入配置（后端 .env + 前端 .env.local）
-      await this.execStep(1, async () => {
-        const backendPort = o.backendPort ?? 3001;
-        const frontendOrigin = o.frontendOrigin ?? "http://localhost:3000";
-        const apiUrl = `http://localhost:${backendPort}/api`;
-        const db = o.db ?? {};
-        const admin = o.admin ?? {};
-        const env = {
-          PORT: String(backendPort),
-          DB_HOST: db.host ?? "127.0.0.1",
-          DB_PORT: String(db.port ?? "3306"),
-          DB_USER: db.user ?? "root",
-          DB_PASSWORD: db.password ?? "",
-          DB_NAME: db.name ?? "pipemind",
-          DB_SYNCHRONIZE: "true",
-          AUTH_ACCESS_TOKEN_TTL: "1800",
-          AUTH_REFRESH_TOKEN_TTL: "604800",
-          AUTH_REMEMBER_TOKEN_TTL: "2592000",
-          COOKIE_SECURE: "false",
-          AUTH_ADMIN_USERNAME: admin.username ?? "PipeMind",
-          AUTH_ADMIN_PASSWORD: admin.password ?? "PipeMind",
-          CORS_ORIGIN: frontendOrigin,
-          RSA_PRIVATE_KEY_PATH: "keys/private.pem",
-          RSA_PUBLIC_KEY_PATH: "keys/public.pem",
-        };
-        writeEnvFile(join(BACKEND, ".env"), env);
-        writeEnvFile(join(FRONTEND, ".env.local"), {
-          NEXT_PUBLIC_API_BASE: apiUrl,
-        }, "# generated by PipeMind Installer");
-        this.pushLog(`已写入 backend/.env（库 ${env.DB_NAME} @ ${env.DB_HOST}:${env.DB_PORT}）`);
-        this.pushLog(`已写入 frontend/.env.local（API=${apiUrl}）`);
-      });
-
-      // 3. 后端依赖
-      await this.execStep(2, async () => {
-        await this.npmCi(BACKEND, "backend");
-      });
-
-      // 4. 数据库：建库 + 连通性校验
-      await this.execStep(3, async () => {
-        const db = o.db ?? {};
-        const dbName = db.name ?? "pipemind";
-        let conn;
-        try {
-          conn = await mysqlConnect({
-            host: db.host ?? "127.0.0.1",
-            port: Number(db.port ?? 3306),
-            user: db.user ?? "root",
-            password: db.password ?? "",
-            connectTimeout: 8000,
-          });
-        } catch (err) {
-          throw new Error(`无法连接 MySQL（${db.host}:${db.port ?? 3306}）：${err.message}`);
+        const completed = await this.execStepSafe(i, steps[i]);
+        if (!completed) {
+          // 步骤执行中被暂停中断：等待继续后原地重跑
+          this.paused = true;
+          this.status = "paused";
+          this.current = i;
+          await this.waitWhilePaused();
+          this.status = "running";
+          this.stepState[i] = "pending";
+          continue;
         }
-        try {
-          await conn.query(
-            `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
-          );
-          this.pushLog(`数据库 ${dbName} 已就绪（不存在则已创建）`);
-        } finally {
-          await conn.end().catch(() => void 0);
-        }
-        try {
-          const probe = await mysqlConnect({
-            host: db.host ?? "127.0.0.1",
-            port: Number(db.port ?? 3306),
-            user: db.user ?? "root",
-            password: db.password ?? "",
-            database: dbName,
-            connectTimeout: 8000,
-          });
-          await probe.query("SELECT 1");
-          await probe.end().catch(() => void 0);
-          this.pushLog(`已通过账号 ${db.user} 连接库 ${dbName} 校验（SELECT 1 OK）`);
-        } catch (err) {
-          throw new Error(`数据库连接校验失败：${err.message}`);
-        }
-      });
-
-      // 5. 后端编译
-      await this.execStep(4, async () => {
-        await run(npmCmd, ["run", "build"], {
-          cwd: BACKEND,
-          onLine: (l) => this.pushLog(`[backend:build] ${l}`),
-          timeoutMs: 10 * 60 * 1000,
-        });
-        this.pushLog("后端编译完成（backend/dist）");
-      });
-
-      // 6. 前端依赖
-      await this.execStep(5, async () => {
-        await this.npmCi(FRONTEND, "frontend");
-      });
-
-      // 7. 前端编译（NEXT_PUBLIC_* 已在第 2 步写入 .env.local）
-      await this.execStep(6, async () => {
-        await run(npmCmd, ["run", "build"], {
-          cwd: FRONTEND,
-          onLine: (l) => this.pushLog(`[frontend:build] ${l}`),
-          timeoutMs: 15 * 60 * 1000,
-        });
-        this.pushLog("前端编译完成（frontend/.next）");
-      });
-
-      // 8. 启动并健康检查
-      await this.execStep(7, async () => {
-        const backendPort = o.backendPort ?? 3001;
-        const frontendPort = o.frontendPort ?? 3000;
-        services.startBackend({ port: backendPort });
-        this.pushLog(`后端启动中：http://localhost:${backendPort}`);
-        const backendOk = await this.pollOk(
-          `http://127.0.0.1:${backendPort}/api/auth/public-key`,
-          (res) => res.status === 200,
-        );
-        if (!backendOk) throw new Error("后端健康检查未通过（/api/auth/public-key 无响应）");
-        services.startFrontend({ port: frontendPort });
-        this.pushLog(`前端启动中：http://localhost:${frontendPort}`);
-        const frontendOk = await this.pollOk(
-          `http://127.0.0.1:${frontendPort}`,
-          (res) => res.status >= 200 && res.status < 500,
-        );
-        if (!frontendOk) throw new Error("前端健康检查未通过（首页无响应）");
-
-        writeJson(RUNTIME_FILE, {
-          installedAt: now(),
-          backendPort,
-          frontendPort,
-          frontendUrl: `http://localhost:${frontendPort}`,
-          backendUrl: `http://localhost:${backendPort}`,
-          dbName: o.db?.name ?? "pipemind",
-          admin: o.admin?.username ?? "PipeMind",
-        });
-        this.pushLog("安装完成，服务已启动");
-      });
-
+        this.stepState[i] = "done";
+        i += 1;
+      }
       this.status = "done";
       this.current = -1;
     } catch (err) {
@@ -236,44 +155,225 @@ export class InstallJob {
       services.stop();
     } finally {
       this.finishedAt = now();
+      this.activeChild = null;
     }
   }
 
-  async execStep(index, fn) {
+  async waitWhilePaused() {
+    while (this.pauseRequested && !this.cancelled) {
+      await wait(400);
+    }
+    this.paused = false;
+    this.pauseRequested = false;
+  }
+
+  // 执行单个步骤；若因暂停中断则返回 false
+  async execStepSafe(index, fn) {
     this.current = index;
     this.stepState[index] = "running";
     try {
       await fn();
-      this.stepState[index] = "done";
+      return true;
     } catch (err) {
+      if (this.pauseRequested) {
+        this.stepState[index] = "paused";
+        this.pushLog(`步骤「${STEPS[index].label}」已中断，等待继续…`, "warn");
+        return false;
+      }
       this.stepState[index] = "error";
       throw err;
     }
   }
 
+  async withChild(fn) {
+    return fn();
+  }
+
+  // ---------- 各步骤 ----------
+
+  async stepPreflight(o) {
+    const problems = validateOptions(o);
+    if (problems.length) throw new Error(problems.join("；"));
+    const checks = await runChecks();
+    if (!checks.ok) {
+      throw new Error(
+        "环境预检未通过：" + checks.items.filter((i) => !i.ok).map((i) => i.label).join("、"),
+      );
+    }
+    this.pushLog("环境预检通过：Node " + process.version);
+  }
+
+  async stepWriteConfig(o) {
+    const backendPort = o.backendPort ?? 3001;
+    const frontendOrigin = o.frontendOrigin ?? "http://localhost:3000";
+    const apiUrl = `http://localhost:${backendPort}/api`;
+    const db = o.db ?? {};
+    const admin = o.admin ?? {};
+    const env = {
+      PORT: String(backendPort),
+      DB_HOST: db.host ?? "127.0.0.1",
+      DB_PORT: String(db.port ?? "3306"),
+      DB_USER: db.user ?? "root",
+      DB_PASSWORD: db.password ?? "",
+      DB_NAME: db.name ?? "pipemind",
+      DB_SYNCHRONIZE: "true",
+      AUTH_ACCESS_TOKEN_TTL: "1800",
+      AUTH_REFRESH_TOKEN_TTL: "604800",
+      AUTH_REMEMBER_TOKEN_TTL: "2592000",
+      COOKIE_SECURE: "false",
+      AUTH_ADMIN_USERNAME: admin.username ?? "PipeMind",
+      AUTH_ADMIN_PASSWORD: admin.password ?? "PipeMind",
+      CORS_ORIGIN: frontendOrigin,
+      RSA_PRIVATE_KEY_PATH: "keys/private.pem",
+      RSA_PUBLIC_KEY_PATH: "keys/public.pem",
+    };
+    writeEnvFile(join(BACKEND, ".env"), env);
+    writeEnvFile(join(FRONTEND, ".env.local"), { NEXT_PUBLIC_API_BASE: apiUrl }, "# generated by PipeMind Installer");
+    this.pushLog(`已写入 backend/.env（库 ${env.DB_NAME} @ ${env.DB_HOST}:${env.DB_PORT}）`);
+    this.pushLog(`已写入 frontend/.env.local（API=${apiUrl}）`);
+  }
+
   async npmCi(cwd, tag) {
-    this.pushLog(`[${tag}] npm ci 开始…`);
+    this.pushLog(`[${tag}] 安装依赖中…（可暂停）`);
     try {
       await run(npmCmd, ["ci", "--no-audit", "--no-fund"], {
         cwd,
         onLine: (l) => this.pushLog(`[${tag}] ${l}`),
+        onSpawn: (c) => (this.activeChild = c),
         timeoutMs: 20 * 60 * 1000,
       });
       this.pushLog(`[${tag}] 依赖安装完成`);
     } catch (err) {
-      // npm ci 对未同步的 lockfile 很严格；退回 npm install 更健壮
+      if (this.pauseRequested) throw err;
       this.pushLog(`[${tag}] npm ci 失败，改用 npm install：${err.message}`, "warn");
       await run(npmCmd, ["install", "--no-audit", "--no-fund"], {
         cwd,
         onLine: (l) => this.pushLog(`[${tag}] ${l}`),
+        onSpawn: (c) => (this.activeChild = c),
         timeoutMs: 25 * 60 * 1000,
       });
       this.pushLog(`[${tag}] 依赖安装完成（npm install 回退）`);
+    } finally {
+      this.activeChild = null;
     }
+  }
+
+  async stepBackendDeps() {
+    await this.npmCi(BACKEND, "backend");
+  }
+
+  async stepFrontendDeps() {
+    await this.npmCi(FRONTEND, "frontend");
+  }
+
+  async stepDatabase(o) {
+    const db = o.db ?? {};
+    const dbName = db.name ?? "pipemind";
+    let conn;
+    try {
+      conn = await mysqlConnect({
+        host: db.host ?? "127.0.0.1",
+        port: Number(db.port ?? 3306),
+        user: db.user ?? "root",
+        password: db.password ?? "",
+        connectTimeout: 8000,
+      });
+    } catch (err) {
+      throw new Error(`无法连接 MySQL（${db.host}:${db.port ?? 3306}）：${err.message}`);
+    }
+    try {
+      await conn.query(
+        `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+      );
+      this.pushLog(`数据库 ${dbName} 已就绪（不存在则已创建）`);
+    } finally {
+      await conn.end().catch(() => void 0);
+    }
+    try {
+      const probe = await mysqlConnect({
+        host: db.host ?? "127.0.0.1",
+        port: Number(db.port ?? 3306),
+        user: db.user ?? "root",
+        password: db.password ?? "",
+        database: dbName,
+        connectTimeout: 8000,
+      });
+      await probe.query("SELECT 1");
+      await probe.end().catch(() => void 0);
+      this.pushLog(`已通过账号 ${db.user} 连接库 ${dbName} 校验（SELECT 1 OK）`);
+    } catch (err) {
+      throw new Error(`数据库连接校验失败：${err.message}`);
+    }
+  }
+
+  async buildBackend() {
+    await run(npmCmd, ["run", "build"], {
+      cwd: BACKEND,
+      onLine: (l) => this.pushLog(`[backend:build] ${l}`),
+      onSpawn: (c) => (this.activeChild = c),
+      timeoutMs: 10 * 60 * 1000,
+    });
+    this.pushLog("后端编译完成（backend/dist）");
+  }
+
+  async stepBackendBuild() {
+    await this.buildBackend();
+  }
+
+  async buildFrontend() {
+    await run(npmCmd, ["run", "build"], {
+      cwd: FRONTEND,
+      onLine: (l) => this.pushLog(`[frontend:build] ${l}`),
+      onSpawn: (c) => (this.activeChild = c),
+      timeoutMs: 15 * 60 * 1000,
+    });
+    this.pushLog("前端编译完成（frontend/.next）");
+  }
+
+  async stepFrontendBuild() {
+    await this.buildFrontend();
+  }
+
+  async stepBoot(o) {
+    const backendPort = o.backendPort ?? 3001;
+    const frontendPort = o.frontendPort ?? 3000;
+    services.stop(); // 清理可能的残留
+    services.startBackend({ port: backendPort });
+    this.activeChild = services.backend;
+    this.pushLog(`后端启动中：http://localhost:${backendPort}`);
+    const backendOk = await this.pollOk(
+      `http://127.0.0.1:${backendPort}/api/auth/public-key`,
+      (res) => res.status === 200,
+    );
+    if (backendOk === PAUSE_ABORT) throw new Error(PAUSE_ABORT);
+    if (!backendOk) throw new Error("后端健康检查未通过（/api/auth/public-key 无响应）");
+
+    services.startFrontend({ port: frontendPort });
+    this.activeChild = services.frontend;
+    this.pushLog(`前端启动中：http://localhost:${frontendPort}`);
+    const frontendOk = await this.pollOk(
+      `http://127.0.0.1:${frontendPort}`,
+      (res) => res.status >= 200 && res.status < 500,
+    );
+    if (frontendOk === PAUSE_ABORT) throw new Error(PAUSE_ABORT);
+    if (!frontendOk) throw new Error("前端健康检查未通过（首页无响应）");
+
+    writeJson(RUNTIME_FILE, {
+      installedAt: now(),
+      backendPort,
+      frontendPort,
+      frontendUrl: `http://localhost:${frontendPort}`,
+      backendUrl: `http://localhost:${backendPort}`,
+      dbName: o.db?.name ?? "pipemind",
+      admin: o.admin?.username ?? "PipeMind",
+    });
+    this.activeChild = null;
+    this.pushLog("安装完成，服务已启动");
   }
 
   async pollOk(url, okFn, tries = 90, intervalMs = 1000) {
     for (let i = 0; i < tries; i += 1) {
+      if (this.pauseRequested || this.cancelled) return PAUSE_ABORT;
       try {
         const res = await httpGet(url, 3000);
         if (okFn(res)) return true;

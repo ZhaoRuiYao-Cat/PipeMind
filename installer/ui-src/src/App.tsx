@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { keyframes } from "@emotion/react";
 import Box from "@mui/material/Box";
 import Container from "@mui/material/Container";
 import Stack from "@mui/material/Stack";
@@ -24,10 +25,22 @@ import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
-import SettingsEthernetRounded from "@mui/icons-material/SettingsEthernetRounded";
+import RestartAltRounded from "@mui/icons-material/RestartAltRounded";
+import DeleteSweepRounded from "@mui/icons-material/DeleteSweepRounded";
+import PauseRounded from "@mui/icons-material/PauseRounded";
 import { api, type Meta, type Checks, type JobSnapshot, type InstallOptions } from "./api";
 
 const STEPS_LABEL = ["环境检查", "部署配置", "一键安装", "完成"];
+
+// 步骤切换过渡动画：前进从右滑入，后退从左滑入
+const stepForward = keyframes`
+  from { opacity: 0; transform: translateX(42px); }
+  to   { opacity: 1; transform: translateX(0); }
+`;
+const stepBackward = keyframes`
+  from { opacity: 0; transform: translateX(-42px); }
+  to   { opacity: 1; transform: translateX(0); }
+`;
 
 function iconFor(item: { ok: boolean; severity: string }) {
   if (item.ok) return <CheckCircleRounded color="success" />;
@@ -38,6 +51,9 @@ function iconFor(item: { ok: boolean; severity: string }) {
 export default function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [activeStep, setActiveStep] = useState(0);
+  const [navDir, setNavDir] = useState<"next" | "back">("next");
+  // 已安装时的选择门槛：ask=待选择 continue=保留现有继续 resetting=正在清除
+  const [installedAction, setInstalledAction] = useState<"ask" | "continue" | "resetting">("ask");
   const [checks, setChecks] = useState<Checks | null>(null);
   const [checksLoading, setChecksLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,14 +123,79 @@ export default function App() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [job?.logs.length]);
 
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
   const checkOk = useMemo(() => (checks ? checks.ok : false), [checks]);
   const checkErrors = useMemo(() => (checks ? checks.items.filter((i) => !i.ok) : []), [checks]);
+
+  function goTo(step: number, dir: "next" | "back") {
+    // 越过"已有安装"门槛即视为选择"继续（保留现有配置）"
+    if (installedAction === "ask" && dir === "next") setInstalledAction("continue");
+    setNavDir(dir);
+    setActiveStep(step);
+  }
+
+  async function clearAndReset() {
+    setInstalledAction("resetting");
+    setError(null);
+    try {
+      await api.reset();
+      const m = await api.meta();
+      setMeta(m);
+      setInstalledAction("ask");
+      void runChecks();
+    } catch (err) {
+      setInstalledAction("ask");
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  // 轮询任务进度：done/error 结束，paused/running 持续刷新
+  const startPolling = useCallback(
+    (id: string) => {
+      stopPolling();
+      pollRef.current = setInterval(async () => {
+        try {
+          const snap = await api.job(id);
+          setJob(snap);
+          if (snap.status === "done" || snap.status === "error") {
+            stopPolling();
+            setInstalling(false);
+            if (snap.status === "done") goTo(3, "next");
+          }
+        } catch {
+          /* 轮询失败继续重试 */
+        }
+      }, 800);
+    },
+    [stopPolling],
+  );
+
+  // 组件卸载时停止轮询
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  // 进程检测：页面打开时若已有安装任务在跑/暂停，直接跳到"一键安装(终端)"步骤并接上进度
+  useEffect(() => {
+    if (!meta || activeStep !== 0) return;
+    api
+      .active()
+      .then((r) => {
+        if (r.active && r.job) {
+          setJob(r.job);
+          setInstalling(true);
+          goTo(2, "next");
+          startPolling(r.job.id);
+        }
+      })
+      .catch(() => {
+        /* 检测失败不阻塞正常流程 */
+      });
+  }, [meta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function beginInstall() {
     setError(null);
@@ -127,22 +208,28 @@ export default function App() {
     };
     try {
       const { id } = await api.install(opts);
-      setJob({ id, status: "queued", error: null, current: -1, steps: [], percent: 0, logs: [] });
+      setJob({ id, status: "queued", paused: false, error: null, current: -1, steps: [], percent: 0, logs: [] });
       setInstalling(true);
-      setActiveStep(2);
-      pollRef.current = setInterval(async () => {
-        try {
-          const snap = await api.job(id);
-          setJob(snap);
-          if (snap.status === "done" || snap.status === "error") {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setInstalling(false);
-            if (snap.status === "done") setActiveStep(3);
-          }
-        } catch {
-          /* 轮询失败继续重试 */
-        }
-      }, 800);
+      goTo(2, "next");
+      startPolling(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function pauseJob() {
+    if (!job) return;
+    try {
+      setJob(await api.pause(job.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function resumeJob() {
+    if (!job) return;
+    try {
+      setJob(await api.resume(job.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -152,10 +239,10 @@ export default function App() {
     if (job && job.status === "error") {
       setError(null);
       setJob(null);
-      setActiveStep(1);
+      goTo(1, "back");
     } else {
       setError(null);
-      setActiveStep(0);
+      goTo(0, "back");
     }
   }
 
@@ -175,21 +262,7 @@ export default function App() {
     <Container maxWidth="md" sx={{ py: 4 }}>
       <Paper elevation={0} sx={{ p: 3, border: "1px solid rgba(22,100,255,0.18)", borderRadius: 3 }}>
         {/* 品牌头 */}
-        <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1 }}>
-          <Box
-            sx={{
-              width: 44,
-              height: 44,
-              borderRadius: "12px",
-              bgcolor: "primary.main",
-              color: "#fff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <SettingsEthernetRounded />
-          </Box>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
           <Box sx={{ flex: 1 }}>
             <Typography variant="h5" fontWeight={800} sx={{ letterSpacing: 0.2 }}>
               PipeMind 安装向导
@@ -211,13 +284,66 @@ export default function App() {
           ))}
         </Stepper>
 
-        {meta?.installed && activeStep !== 3 && (
-          <Alert severity="info" sx={{ mb: 2 }} action={
-            <Button size="small" onClick={() => void startServices()} startIcon={<PlayArrowRounded />}>
-              启动服务
-            </Button>
-          }>
-            检测到已有安装记录。可继续按新参数安装（将覆盖配置并重建依赖），或在安装完成后直接打开系统。
+        {/* 已安装选择门槛：继续（保留现有） / 清除缓存重来 */}
+        {installedAction === "resetting" && <LinearProgress sx={{ mb: 2 }} />}
+        {meta?.installed && activeStep !== 3 && installedAction === "ask" && (
+          <Paper
+            variant="outlined"
+            sx={{
+              mb: 2,
+              p: 2,
+              borderColor: "rgba(22,100,255,0.35)",
+              bgcolor: "rgba(22,100,255,0.04)",
+            }}
+          >
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+              <InfoRounded color="primary" />
+              <Typography variant="subtitle1" fontWeight={700}>
+                检测到已有安装
+              </Typography>
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              本机已完成过安装，请选择后续方式：
+              <br />• <b>继续（保留现有）</b>：保留现有配置，可启动服务或按新参数覆盖安装；
+              <br />• <b>清除缓存，重新安装</b>：删除向导生成的配置（backend/.env、frontend/.env.local、运行状态），回到全新安装流程（不会删除数据库与已安装依赖）。
+            </Typography>
+            <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end" }}>
+              <Button
+                variant="outlined"
+                color="error"
+                startIcon={<DeleteSweepRounded />}
+                disabled={installedAction === "resetting"}
+                onClick={() => void clearAndReset()}
+              >
+                清除缓存，重新安装
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<RestartAltRounded />}
+                disabled={installedAction === "resetting"}
+                onClick={() => setInstalledAction("continue")}
+              >
+                继续（保留现有）
+              </Button>
+            </Stack>
+          </Paper>
+        )}
+        {meta?.installed && activeStep !== 3 && installedAction === "continue" && (
+          <Alert
+            severity="info"
+            sx={{ mb: 2 }}
+            action={
+              <Stack direction="row" spacing={1}>
+                <Button size="small" color="error" startIcon={<DeleteSweepRounded />} onClick={() => setInstalledAction("ask")}>
+                  清除重来
+                </Button>
+                <Button size="small" startIcon={<PlayArrowRounded />} onClick={() => void startServices()}>
+                  启动服务
+                </Button>
+              </Stack>
+            }
+          >
+            已保留现有配置：可点"启动服务"直接运行，或继续下一步用新参数覆盖安装。
           </Alert>
         )}
 
@@ -226,6 +352,9 @@ export default function App() {
             {error}
           </Alert>
         )}
+
+        {/* 步骤内容：切换时按方向播放过渡动画 */}
+        <Box key={activeStep} sx={{ animation: `${navDir === "back" ? stepBackward : stepForward} 0.32s ease` }}>
 
         {/* Step 0 —— 环境检查 */}
         {activeStep === 0 && (
@@ -252,15 +381,16 @@ export default function App() {
                 </List>
               )}
             </Paper>
-            <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-              <Typography variant="body2" color={checkOk ? "success.main" : "error.main"}>
-                {checks?.summary ?? "…"}
-              </Typography>
+            <Typography variant="body2" color={checkOk ? "success.main" : "error.main"} sx={{ mt: 2 }}>
+              {checks?.summary ?? "…"}
+            </Typography>
+            {/* 操作按钮统一靠右 */}
+            <Stack direction="row" sx={{ justifyContent: "flex-end", mt: 1.5 }}>
               <Button
                 variant="contained"
                 disabled={!checkOk || checksLoading}
                 endIcon={<ArrowForwardRounded />}
-                onClick={() => setActiveStep(1)}
+                onClick={() => goTo(1, "next")}
               >
                 下一步：部署配置
               </Button>
@@ -307,8 +437,11 @@ export default function App() {
               安装过程：写入配置 → 安装前后端依赖（npm ci）→ 初始化数据库与账号 → 编译 → 自动启动并完成健康检查。耗时取决于网络与机器性能，请保持页面打开。
             </Alert>
 
-            <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-              <Button onClick={() => setActiveStep(0)}>上一步</Button>
+            {/* 上一步 / 一键安装 统一靠右 */}
+            <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end", mt: 2 }}>
+              <Button variant="outlined" onClick={() => goTo(0, "back")}>
+                上一步
+              </Button>
               <Button variant="contained" size="large" startIcon={<PlayArrowRounded />} onClick={() => void beginInstall()}>
                 一键安装
               </Button>
@@ -319,10 +452,35 @@ export default function App() {
         {/* Step 2 —— 安装进度 */}
         {activeStep === 2 && (
           <Box>
-            <LinearProgress variant="determinate" value={job?.percent ?? 0} sx={{ height: 8, borderRadius: 4, mb: 2 }} />
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-              安装进度 {job?.percent ?? 0}%
-            </Typography>
+            <LinearProgress
+              variant={job?.status === "paused" ? "indeterminate" : "determinate"}
+              value={job?.percent ?? 0}
+              sx={{ height: 8, borderRadius: 4, mb: 2 }}
+            />
+            {/* 进度 + 暂停/继续（操作靠右） */}
+            <Stack direction="row" alignItems="center" sx={{ mb: 1.5 }}>
+              <Typography variant="body2" color="text.secondary">
+                安装进度 {job?.percent ?? 0}%
+                {job?.paused && <Box component="span" sx={{ ml: 1, color: "warning.main", fontWeight: 700 }}>· 已暂停</Box>}
+              </Typography>
+              <Box sx={{ flex: 1 }} />
+              {job &&
+                (job.paused ? (
+                  <Button size="small" variant="contained" startIcon={<PlayArrowRounded />} onClick={() => void resumeJob()}>
+                    继续
+                  </Button>
+                ) : (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<PauseRounded />}
+                    disabled={job.status === "done" || job.status === "error"}
+                    onClick={() => void pauseJob()}
+                  >
+                    暂停
+                  </Button>
+                ))}
+            </Stack>
             <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1} sx={{ mb: 2 }}>
               {jobSteps.map((s) => {
                 const state = s.state ?? "pending";
@@ -352,14 +510,17 @@ export default function App() {
               })}
             </Stack>
             {job?.error && (
-              <Alert severity="error" sx={{ mb: 2 }} action={
-                <Button size="small" onClick={retry} startIcon={<RefreshRounded />}>
-                  返回修改
-                </Button>
-              }>
+              <Alert severity="error" sx={{ mb: 1 }}>
                 <AlertTitle>安装未完成</AlertTitle>
                 {job.error}
               </Alert>
+            )}
+            {job?.status === "error" && (
+              <Stack direction="row" sx={{ justifyContent: "flex-end", mt: 1.5 }}>
+                <Button variant="outlined" startIcon={<RefreshRounded />} onClick={retry}>
+                  返回修改
+                </Button>
+              </Stack>
             )}
             <Paper variant="outlined" sx={{ bgcolor: "#0f172a", borderRadius: 2, overflow: "hidden" }}>
               <pre
@@ -411,7 +572,11 @@ export default function App() {
                 </ListItem>
               </List>
             </Paper>
-            <Stack direction="row" justifyContent="center" spacing={2}>
+            {/* 返回 / 打开系统 统一靠右 */}
+            <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end" }}>
+              <Button size="large" variant="outlined" onClick={() => goTo(0, "back")}>
+                返回首页
+              </Button>
               <Button
                 variant="contained"
                 size="large"
@@ -420,15 +585,13 @@ export default function App() {
               >
                 打开系统
               </Button>
-              <Button size="large" onClick={() => setActiveStep(0)}>
-                返回首页
-              </Button>
             </Stack>
           </Box>
         )}
+        </Box>
       </Paper>
 
-      <Stack direction="row" alignItems="center" justifyContent="center" spacing={1} sx={{ mt: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ justifyContent: "center", mt: 3 }}>
         <InfoRounded sx={{ fontSize: 15, color: "text.hint" }} />
         <Typography variant="caption" color="text.hint">
           PipeMind Installer · 仅监听 127.0.0.1:{meta?.uiPort ?? 4200}，安装完成后可在系统内登录并修改管理员密码

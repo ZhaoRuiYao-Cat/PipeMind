@@ -91,7 +91,7 @@ export function probePort(host, port, timeoutMs = 1500) {
 }
 
 // 运行命令直到退出；stdout/stderr 逐行回调（可选），非 0 退出抛错
-export function run(cmd, args, { cwd, env = {}, onLine, timeoutMs = 0 } = {}) {
+export function run(cmd, args, { cwd, env = {}, onLine, onSpawn, timeoutMs = 0 } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(cmd, args, {
       cwd,
@@ -100,6 +100,7 @@ export function run(cmd, args, { cwd, env = {}, onLine, timeoutMs = 0 } = {}) {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    onSpawn?.(child);
     const feed = (buf, level) => {
       const text = buf.toString("utf8");
       for (const line of text.split(/\r?\n/)) {
