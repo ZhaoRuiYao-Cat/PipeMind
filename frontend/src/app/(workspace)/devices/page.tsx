@@ -243,10 +243,6 @@ export default function DevicesPage() {
     setConfirmBox(null);
     if (box) box.onOk();
   };
-  // 关闭动画期间仍用“最后一个有效内容”渲染，避免空弹窗闪现
-  const secretView = useKeepLast(secretDialog);
-  const routeView = useKeepLast(routeFor);
-  const confirmView = useKeepLast(confirmBox);
 
   // 设备审批/密钥/编辑/巡航
   const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
@@ -256,6 +252,10 @@ export default function DevicesPage() {
   const [routeFor, setRouteFor] = useState<DeviceItem | null>(null);
   const [routeSourceName, setRouteSourceName] = useState("");
   const [pointsText, setPointsText] = useState("");
+  // 关闭动画期间仍用“最后一个有效内容”渲染，避免空弹窗闪现
+  const secretView = useKeepLast(secretDialog);
+  const routeView = useKeepLast(routeFor);
+  const confirmView = useKeepLast(confirmBox);
 
   // 基站地图
   const mapCanvasRef = useRef<HTMLCanvasElement | null>(null);
