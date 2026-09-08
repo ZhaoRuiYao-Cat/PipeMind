@@ -47,6 +47,45 @@ export const theme = createTheme({
         }),
       },
     },
+    // iOS 风格开关（主题蓝不变）
+    MuiSwitch: {
+      defaultProps: { disableRipple: true },
+      styleOverrides: {
+        root: {
+          width: 42,
+          height: 26,
+          padding: 0,
+          margin: 2,
+        },
+        switchBase: {
+          padding: 3,
+          color: "#fff",
+          "&:hover": { backgroundColor: "transparent" },
+          "&.Mui-checked": {
+            transform: "translateX(16px)",
+            color: "#fff",
+            "& + .MuiSwitch-track": {
+              backgroundColor: "#1664ff",
+              borderColor: "#1664ff",
+              opacity: 1,
+            },
+          },
+          "&.Mui-disabled + .MuiSwitch-track": { opacity: 0.45 },
+        },
+        thumb: {
+          width: 20,
+          height: 20,
+          boxShadow: "0 2px 4px 0 rgb(0 35 11 / 0.25)",
+        },
+        track: {
+          borderRadius: 13,
+          border: "1px solid #d0d5db",
+          backgroundColor: "#e9e9ea",
+          opacity: 1,
+          boxSizing: "border-box",
+        },
+      },
+    },
     MuiPaper: { styleOverrides: { root: { backgroundImage: "none" } } },
   },
 });
