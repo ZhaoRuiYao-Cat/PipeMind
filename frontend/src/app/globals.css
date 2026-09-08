@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  --pm-color-primary: #1664ff;
+  --pm-color-primary-contrast: #ffffff;
+  --pm-color-primary-hover: #0d55ec;
+  --pm-color-primary-active: #0a48d0;
+  --pm-color-primary-soft: rgb(22 100 255 / 0.08);
+  --pm-color-primary-ring: rgb(22 100 255 / 0.18);
+  --pm-color-page-bg: #ffffff;
+  --pm-color-surface: #ffffff;
+  --pm-color-text-primary: #1d2129;
+  --pm-color-text-secondary: #4e5969;
+  --pm-color-text-hint: #86909c;
+  --pm-color-text-disabled: #c9cdd4;
+  --pm-color-border: #e5e6eb;
+  --pm-color-border-strong: #c9cdd4;
+  --pm-color-divider: #f2f3f5;
+  --pm-radius-sm: 6px;
+  --pm-radius-md: 10px;
+  --pm-radius-lg: 16px;
+  --pm-font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto,
+    Helvetica, Arial, sans-serif;
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  background-color: var(--pm-color-page-bg);
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--pm-color-page-bg);
+  color: var(--pm-color-text-primary);
+  font-family: var(--pm-font-family);
+}
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #ffffff inset !important;
+  -webkit-text-fill-color: var(--pm-color-text-primary) !important;
+  caret-color: var(--pm-color-text-primary) !important;
+  background-color: transparent !important;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+@keyframes pm-focus-in {
+  from {
+    filter: blur(8px);
+    opacity: 0.2;
+  }
+  to {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+.pm-page-focus {
+  animation: pm-focus-in 280ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes pm-focus-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.pm-focus-fade {
+  animation: pm-focus-fade-in 320ms ease both;
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
