@@ -1,6 +1,6 @@
 // PipeMind Installer —— 一键安装编排（Flarum 式分步执行，支持暂停/继续）
 import { join, isAbsolute, dirname, resolve } from "node:path";
-import { randomUUID, generateKeyPairSync } from "node:crypto";
+import { randomUUID, generateKeyPairSync, createPrivateKey, createPublicKey } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import {
   BACKEND,
@@ -266,18 +266,34 @@ export class InstallJob {
     this.pushLog(`已写入 backend/.env（库 ${env.DB_NAME} @ ${env.DB_HOST}:${env.DB_PORT}）`);
     this.pushLog(`已写入 frontend/.env.local（API=${apiUrl}）`);
 
-    // 预生成 RSA 密钥：避免首次启动时依赖后端运行时再生成，导致第一次健康检查不稳
-    const result = await ensureRsaKeyFiles({
-      baseDir: BACKEND,
-      privatePath: rsaPrivate,
-      publicPath: rsaPublic,
-      regenerate: o.rsaRegenerate === true,
-    });
-    this.pushLog(
-      result.created || result.regenerated
-        ? `RSA 密钥已生成（${result.privateFile} / ${result.publicFile}）`
-        : `RSA 密钥已就绪（${result.privateFile} / ${result.publicFile}）`,
-    );
+    // RSA 密钥：支持"直接输入密钥内容"；两者留空则自动生成
+    const privatePem = (o.rsaPrivatePem ?? "").trim();
+    const publicPem = (o.rsaPublicPem ?? "").trim();
+    if (privatePem) {
+      const out = writeRsaKeysFromInput({
+        baseDir: BACKEND,
+        privatePath: rsaPrivate,
+        publicPath: rsaPublic,
+        privatePem,
+        publicPem,
+      });
+      this.pushLog(out.message);
+    } else if (publicPem) {
+      throw new Error("已填写 RSA 公钥但未提供私钥：请提供成对的私钥，或将两者留空由系统自动生成。");
+    } else {
+      // 预生成/复用 RSA 密钥文件：避免首次启动时依赖后端运行时再生成，导致第一次健康检查不稳
+      const result = await ensureRsaKeyFiles({
+        baseDir: BACKEND,
+        privatePath: rsaPrivate,
+        publicPath: rsaPublic,
+        regenerate: o.rsaRegenerate === true,
+      });
+      this.pushLog(
+        result.created || result.regenerated
+          ? `RSA 密钥已自动生成（${result.privateFile} / ${result.publicFile}）`
+          : `RSA 密钥已就绪（${result.privateFile} / ${result.publicFile}）`,
+      );
+    }
   }
 
   async npmCi(cwd, tag) {
@@ -437,6 +453,38 @@ export function isInstalled() {
   const backendEnv = readEnvMap(join(BACKEND, ".env"));
   const frontendEnv = readEnvMap(join(FRONTEND, ".env.local"));
   return isNonEmpty(backendEnv.DB_NAME) && isNonEmpty(frontendEnv.NEXT_PUBLIC_API_BASE);
+}
+
+// 直接以输入值写入 RSA 密钥（PEM 文本），避免依赖预置文件
+export function writeRsaKeysFromInput({ baseDir, privatePath, publicPath, privatePem, publicPem }) {
+  const priv = isAbsolute(privatePath) ? privatePath : resolve(baseDir, privatePath);
+  const pub = isAbsolute(publicPath) ? publicPath : resolve(baseDir, publicPath);
+  if (!/-----BEGIN (RSA )?PRIVATE KEY-----/.test(privatePem) || !/-----END (RSA )?PRIVATE KEY-----/.test(privatePem)) {
+    throw new Error("RSA 私钥格式不正确：需要包含 -----BEGIN PRIVATE KEY----- 的 PEM 内容");
+  }
+  const privKeyObj = createPrivateKey(privatePem);
+  const derivedPublic = createPublicKey(privKeyObj).export({ type: "spki", format: "pem" });
+  if (publicPem && publicPem.trim()) {
+    if (!/-----BEGIN PUBLIC KEY-----/.test(publicPem)) {
+      throw new Error("RSA 公钥格式不正确：需要包含 -----BEGIN PUBLIC KEY----- 的 PEM 内容");
+    }
+    const givenDer = createPublicKey(publicPem).export({ type: "spki", format: "der" });
+    const derivedDer = createPublicKey(privKeyObj).export({ type: "spki", format: "der" });
+    if (!givenDer.equals(derivedDer)) {
+      throw new Error("RSA 私钥与公钥不匹配：请提供同一对密钥，或仅填写私钥由系统自动推导公钥");
+    }
+  } else {
+    publicPem = derivedPublic;
+  }
+  mkdirSync(dirname(priv), { recursive: true });
+  writeFileSync(priv, `${privatePem.trim()}\n`, { encoding: "utf8", mode: 0o600 });
+  mkdirSync(dirname(pub), { recursive: true });
+  writeFileSync(pub, `${publicPem.trim()}\n`, { encoding: "utf8", mode: 0o644 });
+  return {
+    message: "RSA 密钥已按输入写入（私钥 + 公钥），启动时可直接使用。",
+    privateFile: privatePath,
+    publicFile: publicPath,
+  };
 }
 
 // 生成/补全 RSA 密钥文件（默认自动生成；已有且未要求重生成则跳过）

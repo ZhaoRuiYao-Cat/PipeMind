@@ -56,8 +56,8 @@ export interface InstallOptions {
   accessTtl?: string;
   refreshTtl?: string;
   rememberTtl?: string;
-  rsaPrivatePath?: string;
-  rsaPublicPath?: string;
+  rsaPrivatePem?: string;
+  rsaPublicPem?: string;
   rsaRegenerate?: boolean;
 }
 

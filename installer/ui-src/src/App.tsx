@@ -84,8 +84,8 @@ export default function App() {
   const [accessTtl, setAccessTtl] = useState("1800");
   const [refreshTtl, setRefreshTtl] = useState("604800");
   const [rememberTtl, setRememberTtl] = useState("2592000");
-  const [rsaPrivatePath, setRsaPrivatePath] = useState("keys/private.pem");
-  const [rsaPublicPath, setRsaPublicPath] = useState("keys/public.pem");
+  const [rsaPrivatePem, setRsaPrivatePem] = useState("");
+  const [rsaPublicPem, setRsaPublicPem] = useState("");
   const [rsaRegenerate, setRsaRegenerate] = useState(false);
 
   const CONFIG_TABS = [
@@ -130,8 +130,9 @@ export default function App() {
         if (env.AUTH_ACCESS_TOKEN_TTL) setAccessTtl(env.AUTH_ACCESS_TOKEN_TTL);
         if (env.AUTH_REFRESH_TOKEN_TTL) setRefreshTtl(env.AUTH_REFRESH_TOKEN_TTL);
         if (env.AUTH_REMEMBER_TOKEN_TTL) setRememberTtl(env.AUTH_REMEMBER_TOKEN_TTL);
-        if (env.RSA_PRIVATE_KEY_PATH) setRsaPrivatePath(env.RSA_PRIVATE_KEY_PATH);
-        if (env.RSA_PUBLIC_KEY_PATH) setRsaPublicPath(env.RSA_PUBLIC_KEY_PATH);
+        if (env.RSA_PRIVATE_KEY_PATH || env.RSA_PUBLIC_KEY_PATH) {
+          // 已有密钥文件：默认沿用（不预填内容）；如需更换请粘贴新的 PEM 或勾选强制重新生成
+        }
         if (env.CORS_ORIGIN) {
           setFrontendOrigin(env.CORS_ORIGIN);
           try {
@@ -282,8 +283,8 @@ export default function App() {
       accessTtl: accessTtl.trim(),
       refreshTtl: refreshTtl.trim(),
       rememberTtl: rememberTtl.trim(),
-      rsaPrivatePath: rsaPrivatePath.trim(),
-      rsaPublicPath: rsaPublicPath.trim(),
+      rsaPrivatePem,
+      rsaPublicPem,
       rsaRegenerate,
     };
     try {
@@ -584,14 +585,38 @@ export default function App() {
                   密钥与高级 / Keys &amp; Advanced
                 </Typography>
                 <Alert severity="info" sx={{ mb: 2 }}>
-                  RSA 密钥用于登录口令加密。默认<b>自动生成</b>：全新安装无需准备任何证书，配置写入后即生成，保证首次启动健康检查即通过。
+                  RSA 密钥用于登录口令加密。默认<b>自动生成</b>：无需预置任何文件。
+                  如需自定义，请<b>直接粘贴 PEM 密钥内容</b>（不再填写文件路径）：
+                  可只填私钥（自动推导公钥），或私钥与公钥成对填写（将校验是否匹配）。
                 </Alert>
                 <Stack spacing={2}>
-                  <TextField label="私钥路径 (RSA_PRIVATE_KEY_PATH)" value={rsaPrivatePath} onChange={(e) => setRsaPrivatePath(e.target.value)} helperText="相对 backend/ 运行目录或绝对路径" />
-                  <TextField label="公钥路径 (RSA_PUBLIC_KEY_PATH)" value={rsaPublicPath} onChange={(e) => setRsaPublicPath(e.target.value)} helperText="相对 backend/ 运行目录或绝对路径" />
+                  <TextField
+                    label="RSA 私钥（PEM，可留空=自动生成）"
+                    value={rsaPrivatePem}
+                    onChange={(e) => setRsaPrivatePem(e.target.value)}
+                    multiline
+                    minRows={4}
+                    maxRows={7}
+                    placeholder="-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----"
+                    slotProps={{
+                      input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
+                    }}
+                  />
+                  <TextField
+                    label="RSA 公钥（PEM，可留空；填了私钥则自动推导）"
+                    value={rsaPublicPem}
+                    onChange={(e) => setRsaPublicPem(e.target.value)}
+                    multiline
+                    minRows={3}
+                    maxRows={6}
+                    placeholder="-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----"
+                    slotProps={{
+                      input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
+                    }}
+                  />
                   <FormControlLabel
                     control={<Switch checked={rsaRegenerate} onChange={(e) => setRsaRegenerate(e.target.checked)} />}
-                    label="强制重新生成密钥（覆盖已有密钥文件）"
+                    label="两框留空时强制重新生成密钥（覆盖已有密钥）"
                   />
                   <FormControlLabel
                     control={<Switch checked={dbSync} onChange={(e) => setDbSync(e.target.checked)} />}
