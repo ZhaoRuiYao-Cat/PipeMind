@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { readJson, UI_DIR, DEFAULT_PORT, IS_WIN, readEnvMap, BACKEND, FRONTEND, RUNTIME_FILE } from "./lib/common.mjs";
+import { readJson, UI_DIR, DEFAULT_PORT, IS_WIN, readEnvMap, BACKEND, FRONTEND, RUNTIME_FILE, httpGet, wait } from "./lib/common.mjs";
 import { runChecks } from "./lib/checks.mjs";
 import { InstallJob, services, isInstalled, STEPS } from "./lib/installer.mjs";
 
@@ -54,6 +54,19 @@ function sendFile(res, filePath) {
     "Content-Length": data.length,
   });
   res.end(data);
+}
+
+async function pollHealth(url, okFn, tries, intervalMs) {
+  for (let i = 0; i < tries; i += 1) {
+    try {
+      const res = await httpGet(url, 2500);
+      if (okFn(res.status)) return true;
+    } catch {
+      /* 未就绪，继续重试 */
+    }
+    await wait(intervalMs);
+  }
+  return false;
 }
 
 async function readBody(req) {
@@ -167,11 +180,44 @@ const server = createServer(async (req, res) => {
     }
     if (pathname === "/api/start" && req.method === "POST") {
       const body = await readBody(req);
-      const portB = body?.backendPort ?? 3001;
-      const portF = body?.frontendPort ?? 3000;
-      if (!services.snapshot().backendRunning) services.startBackend({ port: portB });
-      if (!services.snapshot().frontendRunning) services.startFrontend({ port: portF });
-      sendJson(res, 200, { ok: true, ...services.snapshot() });
+      const portB = Number(body?.backendPort ?? 3001);
+      const portF = Number(body?.frontendPort ?? 3000);
+      const snap0 = services.snapshot();
+      if (!snap0.backendRunning) services.startBackend({ port: portB });
+      if (!snap0.frontendRunning) services.startFrontend({ port: portF });
+      // 等待就绪（有真实反馈，避免"点了没反应"）
+      const backendReady = await pollHealth(
+        `http://127.0.0.1:${portB}/api/auth/public-key`,
+        (s) => s === 200,
+        120, // 最多 ~60s
+        500,
+      );
+      const frontendReady = await pollHealth(
+        `http://127.0.0.1:${portF}`,
+        (s) => s >= 200 && s < 500,
+        60,
+        500,
+      );
+      const snap = services.snapshot();
+      const message = backendReady && frontendReady
+        ? "服务已启动"
+        : !backendReady && !frontendReady
+          ? "后端与前端均未能就绪（请查看上方运行日志）"
+          : backendReady
+            ? "后端已就绪，前端未能就绪"
+            : "前端已就绪，后端未能就绪";
+      sendJson(res, 200, {
+        ok: true,
+        message,
+        backendReady,
+        frontendReady,
+        backendRunning: snap.backendRunning,
+        frontendRunning: snap.frontendRunning,
+        urls: {
+          backend: `http://localhost:${portB}`,
+          frontend: `http://localhost:${portF}`,
+        },
+      });
       return;
     }
     if (pathname === "/api/stop" && req.method === "POST") {

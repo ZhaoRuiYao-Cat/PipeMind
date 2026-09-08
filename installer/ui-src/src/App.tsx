@@ -60,6 +60,7 @@ export default function App() {
   const [checksLoading, setChecksLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: "success" | "info"; text: string } | null>(null);
+  const [startingServices, setStartingServices] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [job, setJob] = useState<JobSnapshot | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -326,12 +327,25 @@ export default function App() {
   }
 
   async function startServices() {
+    setStartingServices(true);
+    setError(null);
+    setNotice(null);
     try {
-      await api.start({ backendPort, frontendPort });
+      const r = await api.start({ backendPort, frontendPort });
       const m = await api.meta();
       setMeta(m);
+      if (r.backendReady && r.frontendReady) {
+        setNotice({ kind: "success", text: `${r.message ?? "服务已启动"}：${r.urls?.frontend ?? "http://localhost:3000"}` });
+      } else {
+        setNotice({
+          kind: "info",
+          text: `${r.message ?? "服务未完全就绪"}。可点"清除重来"回到门槛后查看运行日志，或稍后重试。`,
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStartingServices(false);
     }
   }
 
@@ -417,8 +431,8 @@ export default function App() {
                 <Button size="small" color="error" startIcon={<DeleteSweepRounded />} onClick={() => setInstalledAction("ask")}>
                   清除重来
                 </Button>
-                <Button size="small" startIcon={<PlayArrowRounded />} onClick={() => void startServices()}>
-                  启动服务
+                <Button size="small" startIcon={<PlayArrowRounded />} disabled={startingServices} onClick={() => void startServices()}>
+                  {startingServices ? "启动中…" : "启动服务"}
                 </Button>
               </Stack>
             }

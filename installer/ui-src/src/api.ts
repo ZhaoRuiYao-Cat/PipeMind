@@ -95,7 +95,15 @@ export const api = {
   pause: (id: string) => fetchJson<JobSnapshot>(`/api/jobs/${id}/pause`, { method: "POST", body: "{}" }),
   resume: (id: string) => fetchJson<JobSnapshot>(`/api/jobs/${id}/resume`, { method: "POST", body: "{}" }),
   start: (opts: { backendPort?: string; frontendPort?: string }) =>
-    fetchJson<{ ok: boolean }>("/api/start", { method: "POST", body: JSON.stringify(opts) }),
+    fetchJson<{
+      ok: boolean;
+      message?: string;
+      backendReady?: boolean;
+      frontendReady?: boolean;
+      backendRunning?: boolean;
+      frontendRunning?: boolean;
+      urls?: { backend: string; frontend: string };
+    }>("/api/start", { method: "POST", body: JSON.stringify(opts) }),
   stop: () => fetchJson<{ ok: boolean }>("/api/stop", { method: "POST", body: "{}" }),
   reset: () =>
     fetchJson<{ ok: boolean; cancelled: boolean; installed: boolean }>("/api/reset", { method: "POST", body: "{}" }),
