@@ -214,6 +214,16 @@ const STATE_CHIP: Record<string, { label: (zh: boolean) => string; color: string
   revoked: { label: (zh) => (zh ? "已注销" : "Revoked"), color: "#86909c", bg: "rgba(134,144,156,0.12)" },
 };
 
+/** 保留最后一个非空值：Dialog 关闭动画期间内容不因数据置空而闪空窗 */
+function useKeepLast<T>(value: T): T {
+  const ref = useRef<T>(value);
+  const blank = value === null || value === undefined || (typeof value === "string" && value === "");
+  if (!blank) {
+    ref.current = value;
+  }
+  return blank ? ref.current : value;
+}
+
 export default function DevicesPage() {
   const { lang } = useI18n();
   const zh = lang === "zh-CN";
@@ -233,6 +243,10 @@ export default function DevicesPage() {
     setConfirmBox(null);
     if (box) box.onOk();
   };
+  // 关闭动画期间仍用“最后一个有效内容”渲染，避免空弹窗闪现
+  const secretView = useKeepLast(secretDialog);
+  const routeView = useKeepLast(routeFor);
+  const confirmView = useKeepLast(confirmBox);
 
   // 设备审批/密钥/编辑/巡航
   const [secretDialog, setSecretDialog] = useState<{ name: string; id: number; secret: string } | null>(null);
@@ -774,24 +788,24 @@ export default function DevicesPage() {
           <Dialog open={secretDialog !== null} onClose={() => setSecretDialog(null)} maxWidth="sm" fullWidth>
             <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{zh ? "设备已注册" : "Device approved"}</DialogTitle>
             <DialogContent>
-              {secretDialog && (
+              {secretView && (
                 <Stack spacing={1.5}>
                   <Alert severity="success" sx={{ borderRadius: "12px" }}>
-                    {zh ? `已同意「${secretDialog.name}」入网。设备密钥仅显示这一次，请立即配置到设备并妥善保存。` : `"${secretDialog.name}" approved. The secret is shown only once.`}
+                    {zh ? `已同意「${secretView.name}」入网。设备密钥仅显示这一次，请立即配置到设备并妥善保存。` : `"${secretView.name}" approved. The secret is shown only once.`}
                   </Alert>
                   <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
                     <Typography sx={{ flex: 1, fontSize: 12.5, fontWeight: 700 }}>{zh ? "设备密钥 x-device-key" : "Device secret"}</Typography>
-                    <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretDialog.secret, "secret")} sx={pillBtn}>
+                    <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretView.secret, "secret")} sx={pillBtn}>
                       {copied === "secret" ? t("已复制", "Copied") : t("复制", "Copy")}
                     </Button>
                   </Stack>
                   <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#0f172a", color: "#9be8c6", fontSize: 12.5, overflowX: "auto", userSelect: "all", fontFamily: "Consolas, 'SF Mono', monospace" }}>
-                    {secretDialog.secret}
+                    {secretView.secret}
                   </Box>
                   <Box component="pre" sx={{ m: 0, p: 1.75, borderRadius: "10px", backgroundColor: "#f8f9fb", border: "1px solid var(--pm-color-border)", fontSize: 11.5, overflowX: "auto", fontFamily: "Consolas, 'SF Mono', monospace" }}>
-                    {secretCurl(secretDialog.id, secretDialog.secret)}
+                    {secretCurl(secretView.id, secretView.secret)}
                   </Box>
-                  <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretCurl(secretDialog.id, secretDialog.secret), "curl")} sx={{ ...pillBtn, alignSelf: "flex-start" }}>
+                  <Button size="small" variant="outlined" startIcon={<ContentCopyRounded sx={{ fontSize: 15 }} />} onClick={() => void copyText(secretCurl(secretView.id, secretView.secret), "curl")} sx={{ ...pillBtn, alignSelf: "flex-start" }}>
                     {copied === "curl" ? t("已复制", "Copied") : t("复制上报示例", "Copy example")}
                   </Button>
                 </Stack>
@@ -821,7 +835,7 @@ export default function DevicesPage() {
           <Dialog open={routeFor !== null} onClose={() => setRouteFor(null)} maxWidth="md" fullWidth>
             <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>
               {zh ? "规划巡航路线" : "Plan cruise route"}
-              {routeFor && <Typography component="span" sx={{ ml: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>· {routeFor.name}</Typography>}
+              {routeView && <Typography component="span" sx={{ ml: 1, fontSize: 13, color: "var(--pm-color-text-hint)" }}>· {routeView.name}</Typography>}
             </DialogTitle>
             <DialogContent>
               <Stack spacing={1.5}>
@@ -854,10 +868,10 @@ export default function DevicesPage() {
 
           {/* 确认框（替代原生 alert） */}
           <Dialog open={confirmBox !== null} onClose={() => setConfirmBox(null)} maxWidth="xs" fullWidth>
-            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{confirmBox?.title}</DialogTitle>
+            <DialogTitle sx={{ fontSize: 17, fontWeight: 700 }}>{confirmView?.title ?? ""}</DialogTitle>
             <DialogContent>
               <Typography sx={{ fontSize: 13.5, color: "var(--pm-color-text-secondary)", lineHeight: 1.7 }}>
-                {confirmBox?.text}
+                {confirmView?.text ?? ""}
               </Typography>
             </DialogContent>
             <DialogActions sx={{ px: 2.5, pb: 2 }}>
