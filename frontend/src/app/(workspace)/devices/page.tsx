@@ -103,33 +103,40 @@ function extractGeoLines(raw: unknown): number[][][] {
 
 export interface PickerView { zoom: number; tx: number; ty: number }
 const PAD = 30;
-interface PickerFit { minLon: number; maxLat: number; cos: number; scale: number }
-function pickerFit(lines: number[][][], width: number, height: number): PickerFit {
+interface PickerFit { minLon: number; maxLat: number; cos: number; scale: number; offX: number; offY: number }
+function pickerFit(lines: number[][][], width: number, height: number, extras: number[][] = []): PickerFit {
   let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-  for (const line of lines) for (const [lon, lat] of line) {
+  const visit = (lon: number, lat: number): void => {
     minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
     minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
-  }
+  };
+  for (const line of lines) for (const [lon, lat] of line) visit(lon, lat);
+  for (const [lon, lat] of extras) visit(lon, lat);
   if (!Number.isFinite(minLon)) { minLon = 126.5; maxLon = 127.5; minLat = 46.3; maxLat = 46.9; }
   const cos = Math.cos(((minLat + maxLat) / 2) * Math.PI / 180);
   const spanLonM = (maxLon - minLon) * 111320 * cos;
   const spanLatM = (maxLat - minLat) * 110540;
   const scale = Math.min((width - PAD * 2) / Math.max(spanLonM, 1), (height - PAD * 2) / Math.max(spanLatM, 1));
-  return { minLon, maxLat, cos, scale };
+  const lenX = spanLonM * scale;
+  const lenY = spanLatM * scale;
+  // 双轴几何居中：剩余空间平均分配到两侧（不足 PAD 时按 PAD 收缩）
+  const offX = Math.max(PAD, (width - lenX) / 2);
+  const offY = Math.max(PAD, (height - lenY) / 2);
+  return { minLon, maxLat, cos, scale, offX, offY };
 }
 function basePoint(fit: PickerFit, lon: number, lat: number): { x: number; y: number } {
-  return { x: PAD + (lon - fit.minLon) * 111320 * fit.cos * fit.scale, y: PAD + (fit.maxLat - lat) * 110540 * fit.scale };
+  return { x: fit.offX + (lon - fit.minLon) * 111320 * fit.cos * fit.scale, y: fit.offY + (fit.maxLat - lat) * 110540 * fit.scale };
 }
 function toCss(W: number, H: number, v: PickerView, x: number, y: number): { x: number; y: number } {
   return { x: (x - W / 2) * v.zoom + W / 2 + v.tx, y: (y - H / 2) * v.zoom + H / 2 + v.ty };
 }
-function fromCss(lines: number[][][], W: number, H: number, v: PickerView, cx: number, cy: number): { lon: number; lat: number } {
-  const fit = pickerFit(lines, W, H);
+function fromCss(lines: number[][][], W: number, H: number, v: PickerView, cx: number, cy: number, extras: number[][] = []): { lon: number; lat: number } {
+  const fit = pickerFit(lines, W, H, extras);
   const bx = (cx - v.tx - W / 2) / v.zoom + W / 2;
   const by = (cy - v.ty - H / 2) / v.zoom + H / 2;
   return {
-    lon: fit.minLon + (bx - PAD) / (111320 * fit.cos * fit.scale),
-    lat: fit.maxLat - (by - PAD) / (110540 * fit.scale),
+    lon: fit.minLon + (bx - fit.offX) / (111320 * fit.cos * fit.scale),
+    lat: fit.maxLat - (by - fit.offY) / (110540 * fit.scale),
   };
 }
 
@@ -151,7 +158,8 @@ function paintFleetMap(
   if (!ctx) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  const fit = pickerFit(lines, W, H);
+  const extras = stations.map((s) => [s.lon, s.lat] as [number, number]);
+  const fit = pickerFit(lines, W, H, extras);
   const at = (lon: number, lat: number): { x: number; y: number } => toCss(W, H, v, basePoint(fit, lon, lat).x, basePoint(fit, lon, lat).y);
   // 网格
   ctx.strokeStyle = "#eef2f7"; ctx.lineWidth = 1;
@@ -303,7 +311,16 @@ export default function DevicesPage() {
     const cv = mapCanvasRef.current;
     if (!cv) return null;
     const rect = cv.getBoundingClientRect();
-    return fromCss(mapLines, Math.max(1, rect.width || 1), Math.max(1, rect.height || 1), mapViewRef.current, clientX - rect.left, clientY - rect.top);
+    const extras = (stations ?? []).map((s) => [s.lon, s.lat] as [number, number]);
+    return fromCss(
+      mapLines,
+      Math.max(1, rect.width || 1),
+      Math.max(1, rect.height || 1),
+      mapViewRef.current,
+      clientX - rect.left,
+      clientY - rect.top,
+      extras,
+    );
   };
 
   const onMapDown = (event: React.PointerEvent<HTMLCanvasElement>): void => {
@@ -328,13 +345,14 @@ export default function DevicesPage() {
     const drag = mapDragRef.current;
     mapDragRef.current = null;
     if (!cv || !drag || drag.moved) return;
-    // 命中基站？
+    // 命中基站？（视野适配需包含基站，保证点击换算与绘制一致）
     const rect = cv.getBoundingClientRect();
     const cssX = event.clientX - rect.left, cssY = event.clientY - rect.top;
     const W = Math.max(1, rect.width || 1), H = Math.max(1, rect.height || 1);
-    const fit = pickerFit(mapLines, W, H);
+    const stationList = stations ?? [];
+    const fit = pickerFit(mapLines, W, H, stationList.map((s) => [s.lon, s.lat] as [number, number]));
     let hit: StationItem | null = null;
-    for (const st of stations ?? []) {
+    for (const st of stationList) {
       const p = toCss(W, H, mapViewRef.current, basePoint(fit, st.lon, st.lat).x, basePoint(fit, st.lon, st.lat).y);
       if (Math.hypot(p.x - cssX, p.y - cssY) < 13) { hit = st; break; }
     }
@@ -606,7 +624,7 @@ export default function DevicesPage() {
                         width: 264,
                         p: 1.5,
                         borderRadius: "12px",
-                        borderColor: "var(--pm-color-primary)",
+                        borderColor: "var(--pm-color-border)",
                         backgroundColor: "rgba(255,255,255,0.97)",
                         boxShadow: "0 10px 30px rgb(16 24 40 / 0.14)",
                       }}
