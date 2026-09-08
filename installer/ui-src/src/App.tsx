@@ -442,7 +442,7 @@ export default function App() {
               <Button variant="outlined" onClick={() => goTo(0, "back")}>
                 上一步
               </Button>
-              <Button variant="contained" size="large" startIcon={<PlayArrowRounded />} onClick={() => void beginInstall()}>
+              <Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => void beginInstall()}>
                 一键安装
               </Button>
             </Stack>
@@ -574,12 +574,11 @@ export default function App() {
             </Paper>
             {/* 返回 / 打开系统 统一靠右 */}
             <Stack direction="row" spacing={1.5} sx={{ justifyContent: "flex-end" }}>
-              <Button size="large" variant="outlined" onClick={() => goTo(0, "back")}>
+              <Button variant="outlined" onClick={() => goTo(0, "back")}>
                 返回首页
               </Button>
               <Button
                 variant="contained"
-                size="large"
                 startIcon={<OpenInNewRounded />}
                 onClick={() => window.open(frontendOrigin, "_blank")}
               >
