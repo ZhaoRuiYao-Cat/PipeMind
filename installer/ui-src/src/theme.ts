@@ -39,10 +39,12 @@ export const theme = createTheme({
         sizeSmall: { height: 36, paddingInline: 16, fontSize: 13 },
       },
     },
-    // 常规输入框全圆角胶囊形（密钥粘贴的多行输入框单独用小圆角覆盖）
+    // 常规单行输入框全圆角胶囊形；多行输入框（如密钥 PEM 粘贴框）用小圆角
     MuiOutlinedInput: {
       styleOverrides: {
-        root: { borderRadius: 999 },
+        root: ({ ownerState }) => ({
+          borderRadius: ownerState?.multiline ? 10 : 999,
+        }),
       },
     },
     MuiPaper: { styleOverrides: { root: { backgroundImage: "none" } } },

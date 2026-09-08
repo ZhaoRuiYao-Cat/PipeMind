@@ -603,7 +603,6 @@ export default function App() {
                       placeholder={`-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----`}
                       sx={{
                         flex: { sm: 1 },
-                        "& .MuiOutlinedInput-root": { borderRadius: 10 },
                       }}
                       slotProps={{
                         input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
@@ -620,7 +619,6 @@ export default function App() {
                       placeholder={`-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----`}
                       sx={{
                         flex: { sm: 1 },
-                        "& .MuiOutlinedInput-root": { borderRadius: 10 },
                       }}
                       slotProps={{
                         input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
