@@ -593,7 +593,7 @@ export default function App() {
       <Stack direction="row" alignItems="center" spacing={1} sx={{ justifyContent: "center", mt: 3 }}>
         <InfoRounded sx={{ fontSize: 15, color: "text.hint" }} />
         <Typography variant="caption" color="text.hint">
-          PipeMind Installer · 仅监听 127.0.0.1:{meta?.uiPort ?? 4200}，安装完成后可在系统内登录并修改管理员密码
+          PipeMind Installer · 仅监听 127.0.0.1:{meta?.uiPort ?? 4200}，安装完成后可在系统内登录并修改密码
         </Typography>
       </Stack>
     </Container>
