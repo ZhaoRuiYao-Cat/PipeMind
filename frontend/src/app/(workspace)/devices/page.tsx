@@ -79,74 +79,102 @@ function extractGeoLines(raw: unknown): number[][][] {
   return lines;
 }
 
-/** 简易等经纬度投影：返回把经纬度映射到画布像素的坐标函数（含余纬余弦修正） */
-function makeProjector(
+/** 点选地图的视口变换（zoom + 平移偏移，CSS 像素坐标系） */
+export interface PickerView {
+  zoom: number;
+  tx: number;
+  ty: number;
+}
+
+const PAD = 30;
+
+/** 依据数据范围计算“贴合画布”的基准投影几何 */
+function pickerFit(
   lines: number[][][],
   width: number,
   height: number,
-  pad = 30,
-): { px: (lon: number, lat: number) => [number, number]; hasData: boolean } {
+): { minLon: number; maxLat: number; cos: number; scale: number } {
   let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-  const visit = (lon: number, lat: number): void => {
-    if (lon < minLon) minLon = lon;
-    if (lon > maxLon) maxLon = lon;
-    if (lat < minLat) minLat = lat;
-    if (lat > maxLat) maxLat = lat;
-  };
-  for (const line of lines) for (const [lon, lat] of line) visit(lon, lat);
-  const hasData = Number.isFinite(minLon);
-  if (!hasData) {
+  for (const line of lines) {
+    for (const [lon, lat] of line) {
+      minLon = Math.min(minLon, lon); maxLon = Math.max(maxLon, lon);
+      minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat);
+    }
+  }
+  if (!Number.isFinite(minLon)) {
     minLon = 126.5; maxLon = 127.5; minLat = 46.3; maxLat = 46.9;
   }
   const cos = Math.cos(((minLat + maxLat) / 2) * Math.PI / 180);
   const spanLonM = (maxLon - minLon) * 111320 * cos;
   const spanLatM = (maxLat - minLat) * 110540;
-  const scale = Math.min((width - pad * 2) / Math.max(spanLonM, 1), (height - pad * 2) / Math.max(spanLatM, 1));
-  const px = (lon: number, lat: number): [number, number] => {
-    const x = pad + (lon - minLon) * 111320 * cos * scale;
-    const y = pad + (maxLat - lat) * 110540 * scale;
-    return [x, y];
-  };
-  return { px, hasData };
+  const scale = Math.min((width - PAD * 2) / Math.max(spanLonM, 1), (height - PAD * 2) / Math.max(spanLatM, 1));
+  return { minLon, maxLat, cos, scale };
 }
 
-/** 画“地图点选”底图：管线 + 已选点 */
+function pickerBasePoint(fit: { minLon: number; maxLat: number; cos: number; scale: number }, lon: number, lat: number): { x: number; y: number } {
+  return {
+    x: PAD + (lon - fit.minLon) * 111320 * fit.cos * fit.scale,
+    y: PAD + (fit.maxLat - lat) * 110540 * fit.scale,
+  };
+}
+
+function pickerToCss(width: number, height: number, view: PickerView, x: number, y: number): { x: number; y: number } {
+  const cx = width / 2, cy = height / 2;
+  return { x: (x - cx) * view.zoom + cx + view.tx, y: (y - cy) * view.zoom + cy + view.ty };
+}
+
+function pickerFromCss(
+  lines: number[][][],
+  width: number,
+  height: number,
+  view: PickerView,
+  cssX: number,
+  cssY: number,
+): { lon: number; lat: number } {
+  const fit = pickerFit(lines, width, height);
+  const cx = width / 2, cy = height / 2;
+  const bx = (cssX - view.tx - cx) / view.zoom + cx;
+  const by = (cssY - view.ty - cy) / view.zoom + cy;
+  const lon = fit.minLon + (bx - PAD) / (111320 * fit.cos * fit.scale);
+  const lat = fit.maxLat - (by - PAD) / (110540 * fit.scale);
+  return { lon, lat };
+}
+
+/** 画“地图点选”底图：管线 + 已选点，支持 view 平移/缩放 */
 function paintStationPicker(
   canvas: HTMLCanvasElement,
   lines: number[][][],
   pick: { lon: number; lat: number } | null,
-): { projector: (lon: number, lat: number) => [number, number] } {
+  view: PickerView,
+): void {
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.round(rect.width * dpr));
-  const h = Math.max(1, Math.round(rect.height * dpr));
-  canvas.width = w;
-  canvas.height = h;
+  const W = Math.max(1, rect.width || 1);
+  const H = Math.max(1, rect.height || 1);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
   const ctx = canvas.getContext("2d");
-  const { px } = makeProjector(lines, w, h);
-  const cssW = rect.width || 1;
-  if (!ctx) return { projector: px };
+  if (!ctx) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssW, h / dpr);
-  // 网格
+  ctx.clearRect(0, 0, W, H);
+  const fit = pickerFit(lines, W, H);
+  const at = (lon: number, lat: number): { x: number; y: number } =>
+    pickerToCss(W, H, view, pickerBasePoint(fit, lon, lat).x, pickerBasePoint(fit, lon, lat).y);
+  // 网格（固定屏幕空间）
   ctx.strokeStyle = "#eef2f7";
   ctx.lineWidth = 1;
-  for (let i = 0; i < cssW; i += 40) {
-    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, h / dpr); ctx.stroke();
-  }
-  for (let i = 0; i < h / dpr; i += 40) {
-    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(cssW, i); ctx.stroke();
-  }
+  for (let i = 0; i < W; i += 40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, H); ctx.stroke(); }
+  for (let i = 0; i < H; i += 40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(W, i); ctx.stroke(); }
   // 管线
   ctx.lineCap = "round";
   for (const line of lines) {
     ctx.strokeStyle = "#8fb7ff";
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
     line.forEach(([lon, lat], i) => {
-      const [x, y] = px(lon, lat);
-      if (i === 0) ctx.moveTo(x / dpr, y / dpr);
-      else ctx.lineTo(x / dpr, y / dpr);
+      const p = at(lon, lat);
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
     });
     ctx.stroke();
   }
@@ -154,21 +182,19 @@ function paintStationPicker(
     ctx.fillStyle = "#9aa4b2";
     ctx.font = "12px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("当前没有 GIS 数据源底图，仍可直接点选（坐标为地图区域坐标）", cssW / 2, h / dpr / 2 - 6);
+    ctx.fillText("滚轮缩放 / 拖拽平移 / 点击选点（当前无 GIS 底图）", W / 2, H / 2 - 30);
   }
-  // 目标点
+  // 已选点
   if (pick) {
-    const [x, y] = px(pick.lon, pick.lat);
-    const dx = x / dpr, dy = y / dpr;
+    const p = at(pick.lon, pick.lat);
     ctx.strokeStyle = "#cf1322";
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(dx, dy, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(dx - 12, dy); ctx.lineTo(dx + 12, dy);
-    ctx.moveTo(dx, dy - 12); ctx.lineTo(dx, dy + 12);
+    ctx.moveTo(p.x - 12, p.y); ctx.lineTo(p.x + 12, p.y);
+    ctx.moveTo(p.x, p.y - 12); ctx.lineTo(p.x, p.y + 12);
     ctx.stroke();
   }
-  return { projector: px };
 }
 
 type Lang = "zh-CN" | "en-US";
@@ -458,45 +484,98 @@ export default function DevicesPage() {
     }
   };
 
-  // 对话框打开/选点变化时重绘点选底图
+  // 点选地图：支持缩放/平移/点击选点
+  const stationViewRef = useRef<PickerView>({ zoom: 1, tx: 0, ty: 0 });
+  const stationDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+
+  const repaintPicker = (): void => {
+    const cv = stationCanvasRef.current;
+    if (cv) paintStationPicker(cv, stationLines, stationPick, stationViewRef.current);
+  };
+
+  // 打开对话框 / 更换底图：重置视图、绘制并挂载滚轮缩放（原生非被动，可阻止页面滚动）
   useEffect(() => {
     const cv = stationCanvasRef.current;
     if (!cv || stationDialog === null) return;
-    const frame = requestAnimationFrame(() => {
-      paintStationPicker(cv, stationLines, stationPick);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [stationDialog, stationLines, stationPick]);
+    stationViewRef.current = { zoom: 1, tx: 0, ty: 0 };
+    const frame = requestAnimationFrame(repaintPicker);
+    const wheelHandler = (ev: WheelEvent): void => {
+      ev.preventDefault();
+      zoomStationAt(ev.clientX, ev.clientY, ev.deltaY);
+    };
+    cv.addEventListener("wheel", wheelHandler, { passive: false });
+    return () => {
+      cancelAnimationFrame(frame);
+      cv.removeEventListener("wheel", wheelHandler);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationDialog, stationLines]);
 
-  const onStationCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>): void => {
+  const zoomStationAt = (clientX: number, clientY: number, deltaY: number): void => {
     const cv = stationCanvasRef.current;
     if (!cv) return;
     const rect = cv.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const x = (event.clientX - rect.left) * dpr;
-    const y = (event.clientY - rect.top) * dpr;
-    // 按与绘制一致的 bounds 反解坐标
-    let lo = Infinity, hi = -Infinity, laLo = Infinity, laHi = -Infinity;
-    for (const line of stationLines) {
-      for (const [lon, lat] of line) {
-        lo = Math.min(lo, lon); hi = Math.max(hi, lon);
-        laLo = Math.min(laLo, lat); laHi = Math.max(laHi, lat);
-      }
+    const W = Math.max(1, rect.width || 1);
+    const H = Math.max(1, rect.height || 1);
+    const cssX = clientX - rect.left;
+    const cssY = clientY - rect.top;
+    const v = stationViewRef.current;
+    const factor = deltaY < 0 ? 1.18 : 1 / 1.18;
+    const nextZoom = Math.min(24, Math.max(0.3, v.zoom * factor));
+    if (Math.abs(nextZoom - v.zoom) < 0.0001) return;
+    const cxx = cssX - W / 2;
+    const cyy = cssY - H / 2;
+    const baseX = (cxx - v.tx) / v.zoom;
+    const baseY = (cyy - v.ty) / v.zoom;
+    v.zoom = nextZoom;
+    v.tx = cxx - baseX * nextZoom;
+    v.ty = cyy - baseY * nextZoom;
+    repaintPicker();
+  };
+
+  // 选点变化后重绘（保留当前缩放/平移）
+  useEffect(() => {
+    if (stationDialog === null) return;
+    const frame = requestAnimationFrame(repaintPicker);
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationPick]);
+
+  const onStationPointerDown = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    if (event.button !== 0) return;
+    (event.currentTarget as HTMLCanvasElement).setPointerCapture?.(event.pointerId);
+    stationDragRef.current = { x: event.clientX, y: event.clientY, moved: false };
+  };
+
+  const onStationPointerMove = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    const drag = stationDragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (drag.moved) {
+      const v = stationViewRef.current;
+      v.tx += dx;
+      v.ty += dy;
+      stationDragRef.current = { x: event.clientX, y: event.clientY, moved: true };
+      repaintPicker();
     }
-    if (!Number.isFinite(lo)) {
-      lo = 126.5; hi = 127.5; laLo = 46.3; laHi = 46.9;
-    }
-    const pad = 30;
-    const cos = Math.cos(((laLo + laHi) / 2) * Math.PI / 180);
-    const w = Math.max(1, Math.round(rect.width * dpr));
-    const h = Math.max(1, Math.round(rect.height * dpr));
-    const scale = Math.min(
-      (w - pad * 2) / Math.max((hi - lo) * 111320 * cos, 1),
-      (h - pad * 2) / Math.max((laHi - laLo) * 110540, 1),
-    );
-    const lon = lo + (x - pad) / (111320 * cos * scale);
-    const lat = laHi - (y - pad) / (110540 * scale);
-    setStationPick({ lon, lat });
+  };
+
+  const onStationPointerUp = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    const cv = stationCanvasRef.current;
+    const drag = stationDragRef.current;
+    stationDragRef.current = null;
+    if (!cv || !drag || drag.moved) return;
+    const rect = cv.getBoundingClientRect();
+    const cssX = event.clientX - rect.left;
+    const cssY = event.clientY - rect.top;
+    const p = pickerFromCss(stationLines, Math.max(1, rect.width || 1), Math.max(1, rect.height || 1), stationViewRef.current, cssX, cssY);
+    setStationPick({ lon: p.lon, lat: p.lat });
+  };
+
+  const onStationPointerCancel = (): void => {
+    stationDragRef.current = null;
   };
 
   const removeStation = async (station: StationItem): Promise<void> => {
@@ -804,14 +883,17 @@ export default function DevicesPage() {
                 >
                   <canvas
                     ref={stationCanvasRef}
-                    style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair" }}
-                    onClick={onStationCanvasClick}
+                    style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
+                    onPointerDown={onStationPointerDown}
+                    onPointerMove={onStationPointerMove}
+                    onPointerUp={onStationPointerUp}
+                    onPointerCancel={onStationPointerCancel}
                   />
                   <Box
                     sx={{
                       position: "absolute",
                       left: 10,
-                      bottom: 10,
+                      top: 10,
                       px: 1,
                       py: 0.25,
                       borderRadius: "8px",
@@ -821,7 +903,7 @@ export default function DevicesPage() {
                       pointerEvents: "none",
                     }}
                   >
-                    {zh ? "点击地图放置/调整基站位置（无需手输经纬度）" : "Click the map to place or move the station"}
+                    {zh ? "滚轮缩放 · 拖拽平移 · 单击选点" : "Scroll to zoom · drag to pan · click to pick"}
                   </Box>
                 </Box>
                 <Alert severity={stationPick ? "success" : "warning"} sx={{ borderRadius: "10px" }}>
