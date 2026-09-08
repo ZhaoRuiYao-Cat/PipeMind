@@ -590,30 +590,43 @@ export default function App() {
                   可只填私钥（自动推导公钥），或私钥与公钥成对填写（将校验是否匹配）。
                 </Alert>
                 <Stack spacing={2}>
-                  <TextField
-                    label="RSA 私钥（PEM，可留空=自动生成）"
-                    value={rsaPrivatePem}
-                    onChange={(e) => setRsaPrivatePem(e.target.value)}
-                    multiline
-                    minRows={4}
-                    maxRows={7}
-                    placeholder="-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----"
-                    slotProps={{
-                      input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
-                    }}
-                  />
-                  <TextField
-                    label="RSA 公钥（PEM，可留空；填了私钥则自动推导）"
-                    value={rsaPublicPem}
-                    onChange={(e) => setRsaPublicPem(e.target.value)}
-                    multiline
-                    minRows={3}
-                    maxRows={6}
-                    placeholder="-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----"
-                    slotProps={{
-                      input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
-                    }}
-                  />
+                  {/* 私钥 / 公钥：左右排布、小圆角、多行 */}
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ alignItems: "stretch" }}>
+                    <TextField
+                      label="RSA 私钥（PEM，可留空=自动生成）"
+                      value={rsaPrivatePem}
+                      onChange={(e) => setRsaPrivatePem(e.target.value)}
+                      multiline
+                      fullWidth
+                      minRows={7}
+                      maxRows={12}
+                      placeholder={`-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----`}
+                      sx={{
+                        flex: { sm: 1 },
+                        "& .MuiOutlinedInput-root": { borderRadius: 10 },
+                      }}
+                      slotProps={{
+                        input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
+                      }}
+                    />
+                    <TextField
+                      label="RSA 公钥（PEM，可留空；填了私钥则自动推导）"
+                      value={rsaPublicPem}
+                      onChange={(e) => setRsaPublicPem(e.target.value)}
+                      multiline
+                      fullWidth
+                      minRows={7}
+                      maxRows={12}
+                      placeholder={`-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----`}
+                      sx={{
+                        flex: { sm: 1 },
+                        "& .MuiOutlinedInput-root": { borderRadius: 10 },
+                      }}
+                      slotProps={{
+                        input: { sx: { fontFamily: "Consolas, 'SF Mono', monospace", fontSize: 12 } },
+                      }}
+                    />
+                  </Stack>
                   <FormControlLabel
                     control={<Switch checked={rsaRegenerate} onChange={(e) => setRsaRegenerate(e.target.checked)} />}
                     label="两框留空时强制重新生成密钥（覆盖已有密钥）"
