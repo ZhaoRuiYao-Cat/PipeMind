@@ -388,6 +388,7 @@ const DICT: Record<string, LangPair> = {
   navData: { "zh-CN": "数据", "en-US": "Data" },
   navDevices: { "zh-CN": "设备", "en-US": "Devices" },
   navApi: { "zh-CN": "API", "en-US": "API" },
+  navDefects: { "zh-CN": "错误记录", "en-US": "Defects" },
   navSettings: { "zh-CN": "设置", "en-US": "Settings" },
   agentCenterTitle: {
     "zh-CN": "PipeMind Flow 简化您的工作流程",

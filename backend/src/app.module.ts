@@ -23,7 +23,9 @@ import { DataFilesModule } from './data-files/data-files.module.js';
 import { Flow } from './flows/entities/flow.entity.js';
 import { FlowsModule } from './flows/flows.module.js';
 import { Device, DeviceRoute, BaseStation } from './fleet/entities/fleet.entities.js';
+import { DefectReport } from './defects/entities/defect-report.entity.js';
 import { FleetModule } from './fleet/fleet.module.js';
+import { DefectsModule } from './defects/defects.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 
 @Module({
@@ -54,6 +56,7 @@ import { CatalogModule } from './catalog/catalog.module.js';
           Device,
           DeviceRoute,
           BaseStation,
+          DefectReport,
         ],
         synchronize: config.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
       }),
@@ -69,6 +72,7 @@ import { CatalogModule } from './catalog/catalog.module.js';
     DataFilesModule,
     FlowsModule,
     FleetModule,
+    DefectsModule,
     CatalogModule,
   ],
   controllers: [],

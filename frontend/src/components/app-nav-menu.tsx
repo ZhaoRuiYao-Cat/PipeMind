@@ -14,6 +14,7 @@ import HubOutlined from "@mui/icons-material/HubOutlined";
 import FolderSharedRounded from "@mui/icons-material/FolderSharedRounded";
 import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import ApiRounded from "@mui/icons-material/ApiRounded";
+import ReportProblemRounded from "@mui/icons-material/ReportProblemRounded";
 import { useI18n } from "@/lib/i18n";
 
 interface NavEntry {
@@ -59,6 +60,12 @@ const NAV_ENTRIES: NavEntry[] = [
     path: "/api-docs",
     textKey: "navApi",
     icon: <ApiRounded sx={{ fontSize: 20 }} />,
+  },
+  {
+    key: "defects",
+    path: "/defects",
+    textKey: "navDefects",
+    icon: <ReportProblemRounded sx={{ fontSize: 20 }} />,
   },
   {
     key: "settings",
