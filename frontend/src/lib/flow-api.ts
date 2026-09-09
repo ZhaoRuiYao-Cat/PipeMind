@@ -100,6 +100,13 @@ export async function fetchFlows(): Promise<FlowView[]> {
   return data.flows ?? [];
 }
 
+export async function fetchFlow(id: number): Promise<FlowView> {
+  const data = await jsonFetch<{ flow: FlowView }>(
+    `${API_BASE}/flows/${id}`,
+  );
+  return data.flow;
+}
+
 export async function createFlow(input: {
   name: string;
   description?: string;
@@ -165,6 +172,7 @@ export function groupLabel(group: string, zh: boolean): string {
     ui: ["界面操作", "UI actions"],
     data_files: ["数据文件", "Data files"],
     gis: ["管网 GIS", "GIS"],
+    flow: ["流程编排", "Flows"],
     core: ["核心", "Core"],
   };
   const entry = map[group];

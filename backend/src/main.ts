@@ -23,6 +23,7 @@ async function bootstrap() {
       'Authorization',
       'Mcp-Session-Id',
       'Accept',
+      'x-device-key',
     ],
     exposedHeaders: ['Mcp-Session-Id'],
   });

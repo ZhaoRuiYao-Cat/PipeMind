@@ -1,4 +1,7 @@
-// 设备 / 基站 / 巡航路线 控制器（REST API，全部 @Public 供外部调用/文档可看）
+// 设备 / 基站 / 巡航路线 控制器（REST API）
+// 安全边界：设备端（模拟器/终端）无需登录即可调用的仅限公开方法上的 @Public——
+// 注册申请、审批状态轮询、凭密钥拉取地图与上报遥测、读取基站与巡航路线。
+// 其余管理操作（审批/拒绝/注销/增删改设备、规划路线、改基站）需登录后调用。
 import {
   BadRequestException,
   Body,
@@ -21,7 +24,6 @@ import { DataFilesService } from "../data-files/data-files.service.js";
 import type { Device, BaseStation } from "./entities/fleet.entities.js";
 
 @Controller("devices")
-@Public()
 export class DevicesController {
   constructor(
     private readonly fleet: FleetService,
@@ -44,6 +46,7 @@ export class DevicesController {
    * （Header: x-device-key），无需系统账号登录。
    */
   @Get("geo/:fileId")
+  @Public()
   async geoData(
     @Param("fileId", ParseIntPipe) fileId: number,
     @Query("device") device?: string,
@@ -61,6 +64,7 @@ export class DevicesController {
    * 安全设计：本接口不签发任何凭据，批准前设备无法上报数据。
    */
   @Post("register")
+  @Public()
   register(@Body() body: Partial<Device>) {
     return this.fleet.registerDevice(body ?? {});
   }
@@ -85,8 +89,9 @@ export class DevicesController {
     return { ok: true };
   }
 
-  /** 设备端轮询注册状态（仅返回状态，不含密钥） */
+  /** 设备端轮询注册状态（仅返回状态，不含密钥），无需登录 */
   @Get(":id/registration")
+  @Public()
   async registration(@Param("id", ParseIntPipe) id: number) {
     const device = await this.fleet.getDevice(id);
     if (!device) {
@@ -118,6 +123,7 @@ export class DevicesController {
 
   // 巡航路线（基于当前 GIS 数据源规划的经纬度点列）
   @Get(":id/route")
+  @Public()
   route(@Param("id", ParseIntPipe) id: number) {
     return this.fleet.getRoute(id);
   }
@@ -137,9 +143,10 @@ export class DevicesController {
 
   /**
    * 真实遥测推送：设备端携带批准时签发的密钥（Header: x-device-key）上报，
-   * 校验通过后经 Socket 广播 `pm:telemetry` 到前端地图。
+   * 校验通过后经 Socket 广播 `pm:telemetry` 到前端地图。无需登录。
    */
   @Post(":id/telemetry")
+  @Public()
   @HttpCode(200)
   async telemetry(
     @Param("id", ParseIntPipe) id: number,
@@ -163,11 +170,12 @@ export class DevicesController {
 }
 
 @Controller("base-stations")
-@Public()
 export class BaseStationsController {
   constructor(private readonly fleet: FleetService) {}
 
+  /** 基站读取开放给设备端/地图展示（不含敏感信息），无需登录 */
   @Get()
+  @Public()
   list(): Promise<BaseStation[]> {
     return this.fleet.listStations();
   }

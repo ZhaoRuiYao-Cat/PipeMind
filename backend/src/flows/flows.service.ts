@@ -3,12 +3,70 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Flow } from './entities/flow.entity.js';
-import { McpService, runAsUser } from '../mcp/mcp.service.js';
+import {
+  McpService,
+  currentRefreshToken,
+  currentUserId,
+  runAsUser,
+  type McpExternalTool,
+} from '../mcp/mcp.service.js';
 import type { FlowEdgeDto, FlowNodeDto } from './dto/save-flow.dto.js';
+import { z } from 'zod';
+
+/** MCP 工具 schema 用正整数 id。 */
+function zNumber(): z.ZodNumber {
+  return z.number().int().positive();
+}
+
+/**
+ * 把工具参数中的 nodes/edges（数组形式）规范化为后端存储的 record 形式；
+ * 未传时返回空对象。
+ */
+function normalizeGraph(args: Record<string, unknown>): {
+  nodes: Record<string, FlowNodeDto>;
+  edges: Record<string, FlowEdgeDto>;
+} {
+  const nodes: Record<string, FlowNodeDto> = {};
+  const rawNodes = Array.isArray(args.nodes) ? args.nodes : [];
+  for (const item of rawNodes) {
+    const record = item as {
+      id?: unknown;
+      tool?: unknown;
+      params?: Record<string, unknown>;
+    };
+    const id = typeof record?.id === 'string' ? record.id : '';
+    const tool = typeof record?.tool === 'string' ? record.tool : '';
+    if (!id || !tool) {
+      throw new BadRequestException('节点必须包含字符串 id 与 tool');
+    }
+    nodes[id] = {
+      id,
+      tool,
+      params:
+        record.params && typeof record.params === 'object'
+          ? (record.params as Record<string, unknown>)
+          : {},
+    };
+  }
+  const edges: Record<string, FlowEdgeDto> = {};
+  const rawEdges = Array.isArray(args.edges) ? args.edges : [];
+  rawEdges.forEach((item, index) => {
+    const record = item as { source?: unknown; target?: unknown };
+    const source = typeof record?.source === 'string' ? record.source : '';
+    const target = typeof record?.target === 'string' ? record.target : '';
+    if (!source || !target) {
+      throw new BadRequestException('连线必须包含字符串 source 与 target');
+    }
+    const edgeId = `e_${index}_${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
+    edges[edgeId] = { id: edgeId, source, target };
+  });
+  return { nodes, edges };
+}
 
 export interface FlowView {
   id: number;
@@ -138,7 +196,7 @@ function resolveParamsDeep(
 }
 
 @Injectable()
-export class FlowsService {
+export class FlowsService implements OnModuleInit {
   private readonly logger = new Logger(FlowsService.name);
 
   constructor(
@@ -146,6 +204,209 @@ export class FlowsService {
     private readonly flowRepository: Repository<Flow>,
     private readonly mcpService: McpService,
   ) {}
+
+  onModuleInit(): void {
+    this.registerMcpFlowTools();
+  }
+
+  /** 把“流程编排”能力暴露为 MCP 工具：AI 助手可查看/创建/修改/运行流程，
+   * 并可把某个流程一键打开到 Flow 画布上（操作画布）。 */
+  private registerMcpFlowTools(): void {
+    const tools: McpExternalTool[] = [
+      {
+        name: 'flow.list',
+        description:
+          '列出当前用户已保存的全部 Flow 流程（名称/节点数/更新时间）。低风险，直接执行。',
+        inputSchema: {},
+        handler: async () => {
+          const rows = await this.list(currentUserId());
+          return JSON.stringify({
+            flows: rows.map((row) => ({
+              id: row.id,
+              name: row.name,
+              description: row.description,
+              nodeCount: Object.keys(row.nodes ?? {}).length,
+              edgeCount: Object.keys(row.edges ?? {}).length,
+              updatedAt: row.updatedAt,
+            })),
+          });
+        },
+      },
+      {
+        name: 'flow.get',
+        description:
+          '读取某个已保存 Flow 流程的完整节点与连线定义（用于在画布中打开、修改或了解结构）。输入 id 来自 flow.list。低风险，直接执行。',
+        inputSchema: { id: zNumber() },
+        handler: async ({ id }) => {
+          const flow = await this.get(currentUserId(), Number(id));
+          return JSON.stringify({ flow });
+        },
+      },
+      {
+        name: 'flow.create',
+        description:
+          '新建一个 Flow 流程：传入名称与节点/连线定义并保存，返回新流程 id。nodes 为节点对象数组，每个节点形如 { "id": "节点唯一id(英文数字)", "tool": "要调用的 MCP 工具名", "params": {工具参数} }，节点可按依赖顺序排列并用 edges 连线（如 gis 搜索后把第一个结果传给下一节点，可写 {{节点id.路径}} 模板引用上游输出）；edges 为连线数组，形如 { "source": "上游节点id", "target": "下游节点id" }。若只想创建空流程壳可省略 nodes/edges。低风险，直接执行。',
+        inputSchema: {
+          name: z.string().min(1).max(120),
+          description: z.string().max(500).optional(),
+          nodes: z
+            .array(
+              z.object({
+                id: z.string().min(1),
+                tool: z.string().min(1),
+                params: z.record(z.string(), z.unknown()).optional(),
+              }),
+            )
+            .optional(),
+          edges: z
+            .array(
+              z.object({
+                source: z.string().min(1),
+                target: z.string().min(1),
+              }),
+            )
+            .optional(),
+        },
+        handler: async (args) => {
+          const { nodes, edges } = normalizeGraph(args);
+          const flow = await this.create(
+            currentUserId(),
+            String(args.name ?? ''),
+            typeof args.description === 'string' ? args.description : '',
+            nodes,
+            edges,
+          );
+          return JSON.stringify({
+            success: true,
+            flow: {
+              id: flow.id,
+              name: flow.name,
+              nodeCount: Object.keys(flow.nodes ?? {}).length,
+            },
+            message: `流程“${flow.name}”已创建（id=${flow.id}），可用 flow.open 打开到 Flow 画布。`,
+          });
+        },
+      },
+      {
+        name: 'flow.update',
+        description:
+          '用新的节点/连线定义整体替换某个已保存 Flow 流程的内容（名称与节点连线同时更新）。id 来自 flow.list；nodes/edges 结构与 flow.create 相同。低风险，直接执行。',
+        inputSchema: {
+          id: zNumber(),
+          name: z.string().min(1).max(120),
+          description: z.string().max(500).optional(),
+          nodes: z
+            .array(
+              z.object({
+                id: z.string().min(1),
+                tool: z.string().min(1),
+                params: z.record(z.string(), z.unknown()).optional(),
+              }),
+            )
+            .optional(),
+          edges: z
+            .array(
+              z.object({
+                source: z.string().min(1),
+                target: z.string().min(1),
+              }),
+            )
+            .optional(),
+        },
+        handler: async (args) => {
+          const existing = await this.get(currentUserId(), Number(args.id));
+          const name =
+            typeof args.name === 'string' && args.name.trim().length > 0
+              ? String(args.name)
+              : existing.name;
+          const description =
+            typeof args.description === 'string'
+              ? args.description
+              : existing.description;
+          const nodes = Array.isArray(args.nodes)
+            ? normalizeGraph(args).nodes
+            : existing.nodes;
+          const edges = Array.isArray(args.edges)
+            ? normalizeGraph(args).edges
+            : existing.edges;
+          const flow = await this.update(
+            currentUserId(),
+            Number(args.id),
+            name,
+            description,
+            nodes,
+            edges,
+          );
+          return JSON.stringify({
+            success: true,
+            flow: {
+              id: flow.id,
+              name: flow.name,
+              nodeCount: Object.keys(flow.nodes ?? {}).length,
+            },
+          });
+        },
+      },
+      {
+        name: 'flow.delete',
+        description:
+          '删除某个已保存的 Flow 流程。id 来自 flow.list。低风险，直接执行。',
+        inputSchema: { id: zNumber() },
+        handler: async ({ id }) => {
+          await this.remove(currentUserId(), Number(id));
+          return JSON.stringify({ success: true, deleted: Number(id) });
+        },
+      },
+      {
+        name: 'flow.run',
+        description:
+          '按依赖顺序执行某个已保存的 Flow 流程（上游节点先执行，参数中的 {{节点id.路径}} 会替换成上游输出；上游失败则下游跳过），返回每个节点的执行结果。id 来自 flow.list。低风险，直接执行。',
+        inputSchema: { id: zNumber() },
+        handler: async ({ id }) => {
+          const flow = await this.get(currentUserId(), Number(id));
+          const result = await this.run(
+            currentUserId(),
+            currentRefreshToken(),
+            flow.nodes,
+            flow.edges,
+          );
+          const steps = result.steps.map((step) => ({
+            nodeId: step.nodeId,
+            tool: step.tool,
+            status: step.status,
+            ms: step.ms,
+            ...(step.error ? { error: step.error } : {}),
+            ...(step.output
+              ? { output: (step.output ?? '').slice(0, 600) }
+              : {}),
+          }));
+          return JSON.stringify({
+            ok: result.ok,
+            order: result.order,
+            steps,
+            message: result.ok
+              ? `流程执行成功：${steps.length} 个节点全部完成`
+              : `流程执行完成，但有节点失败/跳过，详见 steps。`,
+          });
+        },
+      },
+      {
+        name: 'flow.open',
+        description:
+          '把某个已保存的 Flow 流程打开到 Flow 画布页面（/agent）上供查看、修改与运行；若当前不在画布页会自动跳转过去。id 来自 flow.list。低风险，直接执行。',
+        inputSchema: { id: zNumber() },
+        handler: async ({ id }) => {
+          const flow = await this.get(currentUserId(), Number(id));
+          return this.mcpService.enqueueUiActionForCurrentUser('flow_open', {
+            flowId: Number(id),
+            name: flow.name,
+          });
+        },
+      },
+    ];
+    this.mcpService.registerExternalTools(tools);
+    this.logger.log(`registered ${tools.length} flow mcp tools`);
+  }
 
   async list(userId: number): Promise<FlowView[]> {
     const rows = await this.flowRepository.find({

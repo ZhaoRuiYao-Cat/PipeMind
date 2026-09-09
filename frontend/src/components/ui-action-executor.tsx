@@ -142,6 +142,33 @@ export function UiActionExecutor() {
         await resolveAction(action.id, "done");
         return;
       }
+      if (action.action === "flow_open") {
+        const flowId = Number(action.params.flowId ?? 0);
+        if (!Number.isFinite(flowId) || flowId <= 0) {
+          await resolveAction(action.id, "failed", "流程编号无效");
+          return;
+        }
+        // 先记录待打开流程（防止跳转期间监听器未挂载），再跳到 Flow 画布页，
+        // 最后广播事件让画布载入该流程。
+        try {
+          globalThis.sessionStorage.setItem(
+            "pm:flow:open",
+            String(flowId),
+          );
+        } catch {
+          void 0;
+        }
+        router.push("/agent");
+        await sleep(750);
+        window.dispatchEvent(
+          new CustomEvent("pm-flow-open", {
+            detail: { flowId },
+          }),
+        );
+        await sleep(400);
+        await resolveAction(action.id, "done");
+        return;
+      }
       await resolveAction(action.id, "failed", "未知指令类型");
     } catch {
       await resolveAction(action.id, "failed", "指令执行异常");

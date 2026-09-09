@@ -44,6 +44,7 @@ const GROUP_LABELS: Record<string, { "zh-CN": string; "en-US": string }> = {
   account: { "zh-CN": "账户", "en-US": "Account" },
   ui: { "zh-CN": "界面控制", "en-US": "UI control" },
   data_files: { "zh-CN": "数据文件", "en-US": "Data files" },
+  flow: { "zh-CN": "流程编排", "en-US": "Flows" },
   core: { "zh-CN": "核心", "en-US": "Core" },
 };
 

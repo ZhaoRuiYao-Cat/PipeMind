@@ -112,6 +112,15 @@ export interface McpToolCatalogEntry {
   highRisk: boolean;
 }
 
+/** 允许其他模块（如 flows）把 MCP 工具注入到同一个目录，供 AI 助手调用。 */
+export interface McpExternalTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, z.ZodTypeAny>;
+  handler: (args: Record<string, unknown>) => Promise<string>;
+  highRisk?: boolean;
+}
+
 const HIGH_RISK_TOOL_NAMES = new Set<string>([
   'account.change_username',
   'account.change_password',
@@ -132,6 +141,7 @@ const MCP_TOOL_GROUPS = [
   'ui',
   'data_files',
   'gis',
+  'flow',
   'core',
 ] as const;
 
@@ -256,29 +266,84 @@ export class McpService {
   }
 
   private zodToSchema(schema: z.ZodTypeAny): Record<string, unknown> {
-    const def = schema._def as {
-      innerType?: z.ZodTypeAny;
-      entries?: Record<string, unknown>;
-      values?: unknown[];
-    };
-    if (schema.constructor.name === 'ZodString') {
+    // zod v4 内部结构：仅用于反射输出 JSON Schema，故用宽松类型访问。
+    const rawDef = (schema as unknown as {
+      _def: {
+        innerType?: z.ZodTypeAny;
+        element?: z.ZodTypeAny;
+        type?: z.ZodTypeAny | string;
+        valueType?: z.ZodTypeAny;
+        entries?: Record<string, unknown>;
+        shape?: Record<string, z.ZodTypeAny> | (() => Record<string, z.ZodTypeAny>);
+        values?: unknown[];
+      };
+    })._def;
+    const name = schema.constructor.name;
+    if (name === 'ZodString') {
       return { type: 'string' };
     }
-    if (schema.constructor.name === 'ZodNumber') {
+    if (name === 'ZodNumber') {
       return { type: 'number' };
     }
-    if (schema.constructor.name === 'ZodBoolean') {
+    if (name === 'ZodBoolean') {
       return { type: 'boolean' };
     }
-    if (schema.constructor.name === 'ZodEnum') {
-      const values = def.values ?? Object.keys(def.entries ?? {});
+    if (name === 'ZodEnum') {
+      const values = rawDef.values ?? Object.keys(rawDef.entries ?? {});
       return { type: 'string', enum: values as string[] };
     }
-    if (schema.constructor.name === 'ZodOptional' && def.innerType) {
-      return this.zodToSchema(def.innerType);
+    if (name === 'ZodOptional' || name === 'ZodNullable') {
+      const inner =
+        rawDef.innerType ??
+        (typeof rawDef.type === 'object' && rawDef.type !== null
+          ? rawDef.type
+          : undefined);
+      if (inner) {
+        return this.zodToSchema(inner);
+      }
     }
-    if (schema.constructor.name === 'ZodRecord') {
-      return { type: 'object' };
+    if (name === 'ZodArray') {
+      const inner =
+        rawDef.element ??
+        rawDef.innerType ??
+        (typeof rawDef.type === 'object' && rawDef.type !== null
+          ? rawDef.type
+          : undefined);
+      const innerSchema =
+        inner && typeof inner === 'object' && inner !== null && 'constructor' in inner
+          ? this.zodToSchema(inner as z.ZodTypeAny)
+          : { type: 'string' };
+      return { type: 'array', items: innerSchema };
+    }
+    if (name === 'ZodObject') {
+      const rawShape = rawDef.shape;
+      const shape =
+        typeof rawShape === 'function'
+          ? rawShape()
+          : (rawShape ?? rawDef.entries ?? {});
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
+      for (const [key, item] of Object.entries(shape)) {
+        properties[key] = this.zodToSchema(item as z.ZodTypeAny);
+        if (!(item as z.ZodTypeAny).isOptional()) {
+          required.push(key);
+        }
+      }
+      return {
+        type: 'object',
+        properties,
+        ...(required.length > 0 ? { required } : {}),
+      };
+    }
+    if (name === 'ZodRecord') {
+      const valueType = rawDef.valueType;
+      return {
+        type: 'object',
+        ...(valueType ? { additionalProperties: this.zodToSchema(valueType) } : {}),
+      };
+    }
+    if (name === 'ZodAny' || name === 'ZodUnknown') {
+      return {};
     }
     return { type: 'string' };
   }
@@ -295,6 +360,16 @@ export class McpService {
       highRisk:
         tool.highRisk === true || HIGH_RISK_TOOL_NAMES.has(tool.name),
     });
+  }
+
+  /**
+   * 供其他模块（如 flows）注入自己的 MCP 工具，与内置工具共用同一目录。
+   * 需在应用启动早期（onModuleInit）调用，AI 助手与 Flow 画布即可看到这些工具。
+   */
+  registerExternalTools(tools: McpExternalTool[]): void {
+    for (const tool of tools) {
+      this.registerTool(tool);
+    }
   }
 
   private async requestManualGuide(
@@ -554,6 +629,14 @@ export class McpService {
       message:
         '已生成界面指令并排队，前端界面将立即自动执行（导航/滚动/点击），无需您手动操作。',
     });
+  }
+
+  /** 供其他模块（如 flows）在 MCP 工具内给当前浏览器界面下发 UI 指令。 */
+  async enqueueUiActionForCurrentUser(
+    action: string,
+    params: Record<string, unknown>,
+  ): Promise<string> {
+    return this.enqueueUiAction(action, params);
   }
 
   private registerDataFileTools(): void {

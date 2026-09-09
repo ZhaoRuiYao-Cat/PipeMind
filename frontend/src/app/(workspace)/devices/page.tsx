@@ -298,17 +298,30 @@ export default function DevicesPage() {
     const cv = mapCanvasRef.current;
     if (cv) paintFleetMap(cv, mapLines, stations ?? [], selectedStation?.id ?? null, mapViewRef.current);
   };
+  // 始终指向最新一次渲染的 repaintMap：滚轮缩放/拖拽重绘不因闭包而用过期的选中态
+  const repaintRef = useRef(repaintMap);
+  repaintRef.current = repaintMap;
   useEffect(() => {
     const cv = mapCanvasRef.current;
     if (!cv) return;
     mapViewRef.current = { zoom: 1, tx: 0, ty: 0 };
-    const frame = requestAnimationFrame(repaintMap);
-    return () => cancelAnimationFrame(frame);
+    const frame = requestAnimationFrame(repaintRef.current);
+    // 原生 wheel 监听（非 passive）：支持滚轮以光标为中心缩放
+    const onNativeWheel = (event: WheelEvent): void => {
+      event.preventDefault();
+      if (event.ctrlKey) return; // 交给浏览器整页缩放
+      zoomAt(event.clientX, event.clientY, event.deltaY);
+    };
+    cv.addEventListener("wheel", onNativeWheel, { passive: false });
+    return () => {
+      cancelAnimationFrame(frame);
+      cv.removeEventListener("wheel", onNativeWheel);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapLines, stations]);
   useEffect(() => {
     if (!stations) return;
-    const frame = requestAnimationFrame(repaintMap);
+    const frame = requestAnimationFrame(repaintRef.current);
     return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedStation?.id, selectedStation?.name, draft.purpose]);
@@ -328,7 +341,7 @@ export default function DevicesPage() {
     v.zoom = next;
     v.tx = cxx - baseX * next;
     v.ty = cyy - baseY * next;
-    repaintMap();
+    repaintRef.current();
   };
 
   const mapCoordsAt = (clientX: number, clientY: number): { lon: number; lat: number } | null => {

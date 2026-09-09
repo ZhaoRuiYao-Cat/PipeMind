@@ -60,6 +60,7 @@ import {
 import {
   createFlow,
   deleteFlow,
+  fetchFlow,
   fetchFlowTools,
   fetchFlows,
   groupLabel,
@@ -103,6 +104,7 @@ const GROUP_ICON: Record<string, React.ReactNode> = {
   ui: <MouseOutlined sx={{ fontSize: 15 }} />,
   data_files: <FolderSharedRounded sx={{ fontSize: 15 }} />,
   gis: <MapOutlined sx={{ fontSize: 15 }} />,
+  flow: <HubRounded sx={{ fontSize: 15 }} />,
   core: <HubRounded sx={{ fontSize: 15 }} />,
 };
 
@@ -162,6 +164,7 @@ export function FlowBuilder() {
     kind: "success" | "error" | "info";
     text: string;
   } | null>(null);
+  const lastOpenedFlowRef = useRef<number | null>(null);
 
   const loadTools = useCallback(async () => {
     try {
@@ -500,6 +503,67 @@ export function FlowBuilder() {
     },
     [reactFlow, setEdges, setNodes, toolGroups],
   );
+
+  /** AI 助手通过 MCP flow.open 下发：在画布中载入某个已保存流程 */
+  const openFlowById = useCallback(
+    async (flowId: number) => {
+      if (lastOpenedFlowRef.current === flowId) {
+        return;
+      }
+      lastOpenedFlowRef.current = flowId;
+      try {
+        const flow = await fetchFlow(flowId);
+        loadFlow(flow);
+        setNotice(
+          showFlowNotice("success", zh ? `已在画布打开流程：${flow.name}` : `Opened flow: ${flow.name}`),
+        );
+      } catch (error) {
+        lastOpenedFlowRef.current = null;
+        setNotice(
+          showFlowNotice(
+            "error",
+            error instanceof Error ? error.message : "打开流程失败",
+          ),
+        );
+      }
+    },
+    [loadFlow, zh],
+  );
+
+  // 监听 AI 助手“打开流程到画布”事件；若跳转期间事件先于画布挂载，
+  // 用 sessionStorage 兜底（见 ui-action-executor 的 flow_open 处理）。
+  useEffect(() => {
+    const onFlowOpen = (event: Event): void => {
+      const detail = (event as CustomEvent<{ flowId?: number }>).detail;
+      const flowId = Number(detail?.flowId ?? 0);
+      if (Number.isFinite(flowId) && flowId > 0) {
+        void openFlowById(flowId);
+      }
+    };
+    window.addEventListener("pm-flow-open", onFlowOpen);
+    let pendingId = 0;
+    try {
+      const raw = globalThis.sessionStorage.getItem("pm:flow:open");
+      if (raw) {
+        globalThis.sessionStorage.removeItem("pm:flow:open");
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          pendingId = parsed;
+        }
+      }
+    } catch {
+      void 0;
+    }
+    const timer = pendingId > 0 ? window.setTimeout(() => {
+      void openFlowById(pendingId);
+    }, 600) : null;
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      window.removeEventListener("pm-flow-open", onFlowOpen);
+    };
+  }, [openFlowById]);
 
   const removeSaved = useCallback(
     async (flowId: number) => {
